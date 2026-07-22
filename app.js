@@ -187,18 +187,31 @@ async function loadDivision(div){
     return;
   }
   const [flow, cols, checks, status, changes] = await Promise.all([
-    sb.from("flow_rows").select("*").eq("division",div),
-    sb.from("pending_budget_cols").select("*").eq("division",div),
-    sb.from("pending_budget_checks").select("*"),
-    sb.from("pending_budget_status").select("*"),
-    sb.from("takeoff_changes").select("*").eq("division",div)
+    sbAll(()=>sb.from("flow_rows").select("*").eq("division",div)),
+    sbAll(()=>sb.from("pending_budget_cols").select("*").eq("division",div)),
+    sbAll(()=>sb.from("pending_budget_checks").select("*")),
+    sbAll(()=>sb.from("pending_budget_status").select("*")),
+    sbAll(()=>sb.from("takeoff_changes").select("*").eq("division",div))
   ]);
-  state.flow    = (flow.data||[]).sort(bySort);
-  state.cols    = (cols.data||[]).sort(bySort);
-  state.changes = (changes.data||[]).sort((a,b)=>(b.req_date||"").localeCompare(a.req_date||""));
+  state.flow    = flow.sort(bySort);
+  state.cols    = cols.sort(bySort);
+  state.changes = changes.sort((a,b)=>(b.req_date||"").localeCompare(a.req_date||""));
   const ids=new Set(state.flow.map(r=>r.id));
-  state.checks  = keyChecks((checks.data||[]).filter(c=>ids.has(c.flow_id)));
-  state.status  = keyStatus((status.data||[]).filter(s=>ids.has(s.flow_id)));
+  state.checks  = keyChecks(checks.filter(c=>ids.has(c.flow_id)));
+  state.status  = keyStatus(status.filter(s=>ids.has(s.flow_id)));
+}
+/* Supabase caps a single request at 1000 rows — page through with .range() to get all.
+   Pass a factory so each page gets a fresh query builder. */
+async function sbAll(makeQuery){
+  const PAGE=1000; let from=0, out=[];
+  for(;;){
+    const { data, error } = await makeQuery().range(from, from+PAGE-1);
+    if(error){ console.error("load error:", error); break; }
+    out = out.concat(data||[]);
+    if(!data || data.length<PAGE) break;
+    from += PAGE;
+  }
+  return out;
 }
 const bySort = (a,b)=>(a.sort_order||0)-(b.sort_order||0) || String(a.community_name||a.name||"").localeCompare(String(b.community_name||b.name||""));
 function keyChecks(rows){ const o={}; rows.forEach(r=>o[r.flow_id+"::"+r.col_id]=!!r.checked); return o; }
