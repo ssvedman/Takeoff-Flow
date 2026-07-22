@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lennar Takeoff Flow</title>
+<link rel="icon" href="logo.svg">
+<link rel="stylesheet" href="styles.css?v=25">
+</head>
+<body>
+
+<!-- ===================== AUTH ===================== -->
+<div id="auth">
+  <div class="auth-card">
+    <div class="brand"><img class="auth-logo" src="logo.svg" alt="Takeoff Flow">
+      <h1>Takeoff Flow <span id="demoPill" class="demo-pill hidden">DEMO</span></h1></div>
+    <p class="auth-sub">Sign in with your Lennar email to view the takeoff schedule.</p>
+    <div id="stepEmail">
+      <label class="fld" for="email">Work email</label>
+      <input type="email" id="email" placeholder="you@lennar.com" autocomplete="email">
+      <button class="btn" id="sendBtn">Send verification code</button>
+    </div>
+    <div id="stepCode" class="hidden">
+      <label class="fld" for="code">Enter the code sent to <span id="sentTo"></span></label>
+      <input type="text" id="code" class="code-input" inputmode="numeric" maxlength="10" placeholder="Enter code">
+      <button class="btn" id="verifyBtn">Verify &amp; sign in</button>
+      <button class="btn ghost" id="backBtn" style="margin-top:10px">Use a different email</button>
+    </div>
+    <div id="authMsg" class="msg"></div>
+    <p class="tiny">Access limited to Lennar associates.</p>
+  </div>
+</div>
+
+<!-- ===================== APP ===================== -->
+<div id="app" class="hidden">
+  <header class="topbar">
+    <div class="topbar-in">
+      <button class="home-logo" id="homeLogo" title="Home"><img src="logo.svg" alt="Takeoff Flow — home"></button>
+      <span class="title">Takeoff Flow</span>
+      <select id="divisionSel"></select>
+      <span id="appDemoPill" class="demo-pill hidden">DEMO</span>
+      <div class="gs-wrap">
+        <input type="text" id="globalSearch" placeholder="Filter the current tab…">
+      </div>
+      <div class="spacer"></div>
+      <span class="user-chip" id="userChip"></span>
+      <button class="linkbtn" id="themeBtn" title="Toggle light/dark">Dark</button>
+      <button class="linkbtn hidden" id="adminLink">Admin</button>
+      <button class="linkbtn hidden" id="dashLink">← Back</button>
+      <button class="linkbtn" id="logoutBtn">Sign out</button>
+    </div>
+    <div class="subbar">
+      <div id="banner" class="banner"></div>
+      <div class="subbar-right">
+        <span id="lastUpdateNote" class="last-update"></span>
+        <button class="linkbtn" id="whatsNewBtn" title="Recent updates">What's New</button>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <section id="dashboard">
+      <div class="tabs">
+        <button class="tab active" data-view="flow">Flow of Takeoffs</button>
+        <button class="tab" data-view="budgets">Pending Budgets</button>
+        <button class="tab" data-view="changes">Takeoff Changes</button>
+        <button class="tab" data-view="todo">To-Do List</button>
+      </div>
+      <div class="toolbar" id="viewToolbar"></div>
+      <div id="viewArea"></div>
+    </section>
+
+    <section id="admin" class="hidden">
+      <h2 style="color:var(--navy)">Admin</h2>
+      <div class="admin-layout">
+        <div class="admin-grid">
+          <div class="panel">
+            <div class="panel-h">Import data</div>
+            <div style="padding:16px">
+              <p class="tiny" style="text-align:left;margin:0 0 12px">
+                Upload either the <b>FLOW OF TAKEOFFS workbook</b> (.xlsx — brings in every row, dates and notes
+                as-is) or the division's <b>Starts Log</b> (.xlsx — proposes new Community/Plan/Elevation rows
+                with a suggested trench date). The file type is detected automatically, and the correct tab is read
+                per division (Orlando → <i>Permit Log</i>, Tampa → <i>Start Log</i>). You review before publishing,
+                and existing rows are never overwritten.</p>
+              <label class="fld" for="adminDiv">Division</label>
+              <select id="adminDiv"></select>
+              <div class="uptiles" style="grid-template-columns:1fr">
+                <div class="uptile" id="tileStarts" tabindex="0" role="button" aria-label="Upload workbook">
+                  <div class="uptile-ic">&#8593;</div>
+                  <div class="uptile-t">Flow of Takeoffs&nbsp;/&nbsp;Start Schedule</div>
+                  <div class="uptile-s" id="startsName">Drop the .xlsx here or click to browse</div>
+                </div>
+              </div>
+              <input type="file" id="startsInput" accept=".xlsx,.xlsm" class="hidden">
+              <div class="panel-inset hidden" id="previewPanel"><div id="previewBody"></div></div>
+              <div id="adminMsg" class="msg"></div>
+            </div>
+          </div>
+        </div>
+        <div class="admin-side">
+          <div id="permsPanel"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<!-- All data (flow rows, budgets, checkboxes, changes, plan-name lookup) is served
+     from Supabase — nothing operational is bundled in this repo. The data/*.js and
+     seed_*.sql files are git-ignored (used locally to generate the one-time seed SQL). -->
+<script src="config.js?v=25"></script>
+<script src="app.js?v=25"></script>
+</body>
+</html>

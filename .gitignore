@@ -1,0 +1,14 @@
+node_modules/
+package-lock.json
+.DS_Store
+
+# One-time DB setup + seed data — already applied to Supabase.
+# The data lives in the database, NOT in this public repo. Kept locally only.
+supabase_setup.sql
+seed_orlando.sql
+seed_tampa.sql
+seed_plan_names.sql
+data/
+
+# Internal setup notes — keep local, don't publish
+SETUP.md
