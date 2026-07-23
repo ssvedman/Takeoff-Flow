@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Lennar Takeoff Flow</title>
 <link rel="icon" href="logo.svg">
-<link rel="stylesheet" href="styles.css?v=26">
+<link rel="stylesheet" href="styles.css?v=27">
 </head>
 <body>
 
@@ -75,21 +75,20 @@
       <div class="admin-layout">
         <div class="admin-grid">
           <div class="panel">
-            <div class="panel-h">Import data</div>
+            <div class="panel-h">Import Starts Log</div>
             <div style="padding:16px">
               <p class="tiny" style="text-align:left;margin:0 0 12px">
-                Upload either the <b>FLOW OF TAKEOFFS workbook</b> (.xlsx — brings in every row, dates and notes
-                as-is) or the division's <b>Starts Log</b> (.xlsx — proposes new Community/Plan/Elevation rows
-                with a suggested trench date). The file type is detected automatically, and the correct tab is read
-                per division (Orlando → <i>Permit Log</i>, Tampa → <i>Start Log</i>). You review before publishing,
-                and existing rows are never overwritten.</p>
+                Pick a division and upload its <b>Starts Log</b> (.xlsx). New Community / Plan / Elevation rows are
+                proposed with a suggested trench date. The correct tab is read per division (Orlando →
+                <i>Permit Log</i>, Tampa → <i>Start Log</i>). You review before publishing, and existing rows are
+                never overwritten.</p>
               <label class="fld" for="adminDiv">Division</label>
               <select id="adminDiv"></select>
               <div class="uptiles" style="grid-template-columns:1fr">
-                <div class="uptile" id="tileStarts" tabindex="0" role="button" aria-label="Upload workbook">
+                <div class="uptile" id="tileStarts" tabindex="0" role="button" aria-label="Upload starts log">
                   <div class="uptile-ic">&#8593;</div>
-                  <div class="uptile-t">Flow of Takeoffs&nbsp;/&nbsp;Start Schedule</div>
-                  <div class="uptile-s" id="startsName">Drop the .xlsx here or click to browse</div>
+                  <div class="uptile-t">Starts Log</div>
+                  <div class="uptile-s" id="startsName">Drop the Starts Log .xlsx here or click to browse</div>
                 </div>
               </div>
               <input type="file" id="startsInput" accept=".xlsx,.xlsm" class="hidden">
@@ -111,7 +110,7 @@
 <!-- All data (flow rows, budgets, checkboxes, changes, plan-name lookup) is served
      from Supabase — nothing operational is bundled in this repo. The data/*.js and
      seed_*.sql files are git-ignored (used locally to generate the one-time seed SQL). -->
-<script src="config.js?v=26"></script>
-<script src="app.js?v=26"></script>
+<script src="config.js?v=27"></script>
+<script src="app.js?v=27"></script>
 </body>
 </html>

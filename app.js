@@ -832,7 +832,7 @@ async function loadStartsFile(file){
     const buf=await file.arrayBuffer(); const wb=XLSX.read(buf,{type:"array",cellDates:true});
     const kind = wb.SheetNames.includes("FLOW OF TAKEOFFS") ? "flow" : "starts";
     importState={ file:file.name, wb, kind };
-    buildImportPreview();
+    await buildImportPreview();
   }catch(e){ console.error(e); adminMsg("Couldn't read the file: "+e.message,"err"); }
 }
 /* parse the FLOW OF TAKEOFFS workbook sheet directly → full flow rows.
@@ -899,16 +899,17 @@ function parseStartSchedule(wb, div){
   }
   return [...groups.values()];
 }
-function buildImportPreview(){
+async function buildImportPreview(){
   const div=$("adminDiv").value;
   const isFlow=importState.kind==="flow";
   const proposed=isFlow?parseFlowWorkbook(importState.wb):parseStartSchedule(importState.wb, div);
-  const existing=new Set(MEMorState(div).map(r=>[lc(r.community_name),lc(r.plan),lc(r.elevation||"")].join("|")));
-  const existingComms=new Set(MEMorState(div).map(r=>lc(r.community_name)));
+  const existRows=await existingFlow(div);   // always compare against the TARGET division's rows in the DB
+  const existing=new Set(existRows.map(r=>[lc(r.community_name),lc(r.plan),lc(r.elevation||"")].join("|")));
+  const existingComms=new Set(existRows.map(r=>lc(r.community_name)));
   const fresh=proposed.filter(p=>!existing.has([lc(p.community_name),lc(p.plan),lc(p.elevation||"")].join("|")));
   const panel=$("previewPanel"), body=$("previewBody");
   panel.classList.remove("hidden");
-  const src=isFlow?"FLOW OF TAKEOFFS workbook":"Start Schedule";
+  const src=isFlow?"FLOW OF TAKEOFFS workbook":"Starts Log";
   if(!fresh.length){ body.innerHTML=`<p class="tiny" style="text-align:left">Parsed ${proposed.length} row(s) from the ${src} — all already exist in ${esc(div)}. Nothing new to import.</p>`; return; }
   // ---- change summary ----
   const byComm=new Map();
@@ -931,16 +932,20 @@ function buildImportPreview(){
   body.innerHTML=h;
   $("publishImport").onclick=async()=>{ await publishImport(div, fresh, importState.summary, importState.detail); };
 }
-function MEMorState(div){ return DEMO ? MEM.flow_rows.filter(r=>r.division===div) : (div===state.divKey?state.flow:[]); }
+async function existingFlow(div){
+  if(DEMO) return MEM.flow_rows.filter(r=>r.division===div);
+  return await sbAll(()=>sb.from("flow_rows").select("id,community_name,plan,elevation,sort_order").eq("division",div));
+}
 async function publishImport(div, fresh, summary, detail){
   $("publishImport").disabled=true;
-  let n=(MEMorState(div).at(-1)?.sort_order)||0;
+  const existRows=await existingFlow(div);
+  let n=existRows.reduce((m,r)=>Math.max(m, r.sort_order||0), 0);
   for(const p of fresh){ const row={ id:uid(), division:div, sort_order:++n };
     for(const k in p){ if(k!=="id"&&k!=="division"&&k!=="sort_order") row[k]=p[k]; }
     await saveRow("flow_rows",row); if(div===state.divKey) state.flow.push(row); }
   await logChange(div, summary||`Imported ${fresh.length} row(s) into ${div}`, detail);
   adminMsg(`Published ${fresh.length} row(s) to ${div}.`,"ok");
-  $("previewPanel").classList.add("hidden"); $("tileStarts").classList.remove("filled"); $("startsName").textContent="Drop the .xlsx here or click to browse";
+  $("previewPanel").classList.add("hidden"); $("tileStarts").classList.remove("filled"); $("startsName").textContent="Drop the Starts Log .xlsx here or click to browse";
   if(div===state.divKey) { /* refresh underlying data */ await loadDivision(div); render(); }
 }
 /* ---- change history ("What's New") ---- */
@@ -967,7 +972,7 @@ async function refreshWhatsNewBadge(){
       const when=new Date(latest.at).toLocaleString([], {month:"short",day:"numeric",hour:"numeric",minute:"2-digit"});
       note.textContent=`Last update ${when} · ${latest.by||"—"}`;
       note.title=latest.summary||"";
-    } else note.textContent="";
+    } else { note.textContent="No updates logged yet"; note.title=""; }
   }
 }
 async function openWhatsNew(){
