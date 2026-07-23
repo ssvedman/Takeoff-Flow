@@ -355,9 +355,36 @@ function renderFlow(tb,area){
 }
 async function saveFlowCell(id, field, type, value){
   const r=state.flow.find(x=>x.id===id); if(!r) return;
+  if(field==="plan_name"){ await setPlanName(r, value); return; }   // maps to tf_plan_names, not a per-row value
   r[field]= value===""?null:value;
   await saveRow("flow_rows", r);
   render(); // recompute dependent calc columns
+}
+/* Set/rename a plan's name. Updates the tf_plan_names lookup (so every row in that
+   division with the plan number reflects it), and keeps same-named plans in OTHER
+   divisions in sync when renaming. Clearing the name removes the mapping. */
+async function setPlanName(row, rawName){
+  const div=row.division, planNo=String(row.plan==null?"":row.plan).trim().toUpperCase();
+  if(!planNo){ render(); return; }
+  const name=(rawName==null?"":String(rawName)).trim();
+  state.planNames=state.planNames||{};
+  const map=state.planNames[div]=state.planNames[div]||{};
+  const oldName=map[planNo]||"";
+  if(!name){                                   // clear mapping for this division + plan
+    delete map[planNo];
+    if(!DEMO){ try{ await sb.from("tf_plan_names").delete().eq("division",div).eq("plan_no",planNo); }catch(e){ console.warn(e); } }
+    render(); return;
+  }
+  map[planNo]=name;
+  const upserts=[{division:div, plan_no:planNo, name}];
+  if(oldName && lc(oldName)!==lc(name)){       // rename → keep same-named plans in other divisions in sync
+    for(const d in state.planNames){ if(d===div) continue;
+      const m=state.planNames[d];
+      for(const pn in m){ if(lc(m[pn])===lc(oldName)){ m[pn]=name; upserts.push({division:d, plan_no:pn, name}); } }
+    }
+  }
+  if(!DEMO){ try{ await sb.from("tf_plan_names").upsert(upserts,{onConflict:"division,plan_no"}); }catch(e){ console.warn("plan name save failed",e); } }
+  render();
 }
 
 /* ===================================================================
