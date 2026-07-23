@@ -973,7 +973,7 @@ async function buildImportPreview(){
 }
 async function existingFlow(div){
   if(DEMO) return MEM.flow_rows.filter(r=>r.division===div);
-  return await sbAll(()=>sb.from("flow_rows").select("id,community_name,plan,elevation,sort_order").eq("division",div));
+  return await sbAll(()=>sb.from("flow_rows").select("id,community_name,community_num,plan,elevation,sort_order").eq("division",div));
 }
 async function publishImport(div, fresh, summary, detail){
   $("publishImport").disabled=true;
