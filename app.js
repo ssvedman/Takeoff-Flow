@@ -876,24 +876,31 @@ function parseStartSchedule(wb, div){
   const want = div==="orlando" ? "Permit Log" : div==="tampa" ? "Start Log" : null;
   const sheet = (want && find(want)) || find("Permit Log") || find("Start Log") || find("START SCHEDULE") || wb.SheetNames[0];
   const rows=XLSX.utils.sheet_to_json(wb.Sheets[sheet],{defval:null});
+  const commNum=r=>{ const job=digits(r["Job"]); return job.length>=11 ? job.slice(0,7)+"0000" : (S(r["Comm"])||""); };
+  // Pre-count building sizes so plex lots become "{N}-PLEX" like the workbook does.
+  // Count units per building INSTANCE = community + building + projected-start (matches the
+  // workbook's COUNTIFS(Start, Bldg)); avoids over-counting a reused building id across phases.
+  const startKey=r=>String(r["Start (Prj)"]??r["PrjStart"]??r["Start (Act)"]??r["ActStart"]??"");
+  const bldgCount={};
+  for(const r of rows){ const b=S(r["Bldg"]); if(b){ const k=commNum(r)+"|"+b+"|"+startKey(r); bldgCount[k]=(bldgCount[k]||0)+1; } }
   const idName={}; const groups=new Map();
   for(const r of rows){
-    let comm=null, num="", plan=null, ev=null, trench=null;
+    let comm=null, num="", plan=null, ev=null, trench=null; const bldg=S(r["Bldg"]);
     if(r["Comm"]!=null || (r["Job"]!=null && r["Project"]==null)){       // OLH "Permit Log" format
-      comm=S(r["Comm"]); const job=digits(r["Job"]);
-      num  = job.length>=11 ? job.slice(0,7)+"0000" : (S(r["Comm"])||"");
+      comm=S(r["Comm"]); num=commNum(r);
       plan = S(r["Plan"]); ev = S(r["EV"])||S(r["Elevation"]);
       trench = xlDate(r["TrenchKey"])||xlDate(r["Start (Prj)"])||xlDate(r["Start (Act)"]);
-      if(job.length>=11 && comm) idName[num]=comm;
+      if(num && comm) idName[num]=comm;
     } else if(r["Project"]!=null){                                       // TPU "Start Log" format
       const proj=S(r["Project"])||""; comm = proj.includes(" - ") ? proj.split(" - ").slice(1).join(" - ").trim() : proj;
-      const job=digits(r["Job"]); num = job.length>=11 ? job.slice(0,7)+"0000" : "";
-      plan = S(r["Plan"]); ev = S(r["EV"])||S(r["Elevation"]);
+      num = commNum(r); plan = S(r["Plan"]); ev = S(r["EV"])||S(r["Elevation"]);
       trench = xlDate(r["ActStart"])||xlDate(r["PrjStart"]);
     } else continue;
+    // plex transform: buildings → "{units}-PLEX", elevation → first letter (matches the Flow grid)
+    if(bldg){ const cnt=bldgCount[num+"|"+bldg+"|"+startKey(r)]; if(cnt) plan=cnt+"-PLEX"; if(ev) ev=ev.charAt(0); }
     const name = comm || idName[num] || num;
-    if(!name || !plan) continue;
-    const key=[name,plan,ev||""].join("|");
+    if(!num || !plan) continue;
+    const key=[num,lc(plan),lc(ev||"")].join("|");   // dedup by community NUMBER (names differ between systems)
     if(!groups.has(key)) groups.set(key,{ community_name:name, community_num:num, plan, elevation:ev, first_trench_date:trench });
     else{ const g=groups.get(key); if(trench && (!g.first_trench_date || trench<g.first_trench_date)) g.first_trench_date=trench; }
   }
@@ -904,17 +911,22 @@ async function buildImportPreview(){
   const isFlow=importState.kind==="flow";
   const proposed=isFlow?parseFlowWorkbook(importState.wb):parseStartSchedule(importState.wb, div);
   const existRows=await existingFlow(div);   // always compare against the TARGET division's rows in the DB
-  const existing=new Set(existRows.map(r=>[lc(r.community_name),lc(r.plan),lc(r.elevation||"")].join("|")));
-  const existingComms=new Set(existRows.map(r=>lc(r.community_name)));
-  const fresh=proposed.filter(p=>!existing.has([lc(p.community_name),lc(p.plan),lc(p.elevation||"")].join("|")));
+  // A combination = community NUMBER + plan + elevation. Only genuinely new combinations are added.
+  const combo=(num,plan,ev)=>[String(num||"").trim(),lc(plan),lc(ev||"")].join("|");
+  const existing=new Set(existRows.map(r=>combo(r.community_num,r.plan,r.elevation)));
+  const existingNums=new Set(existRows.map(r=>String(r.community_num||"").trim()));
+  const numName={}; existRows.forEach(r=>{ const n=String(r.community_num||"").trim(); if(n && !(n in numName)) numName[n]=r.community_name; });
+  const fresh=proposed.filter(p=>!existing.has(combo(p.community_num,p.plan,p.elevation)));
+  // for communities already in the grid, keep the grid's canonical name (log names differ)
+  fresh.forEach(p=>{ const n=String(p.community_num||"").trim(); if(numName[n]) p.community_name=numName[n]; });
   const panel=$("previewPanel"), body=$("previewBody");
   panel.classList.remove("hidden");
   const src=isFlow?"FLOW OF TAKEOFFS workbook":"Starts Log";
-  if(!fresh.length){ body.innerHTML=`<p class="tiny" style="text-align:left">Parsed ${proposed.length} row(s) from the ${src} — all already exist in ${esc(div)}. Nothing new to import.</p>`; return; }
+  if(!fresh.length){ body.innerHTML=`<p class="tiny" style="text-align:left">Parsed ${proposed.length} combination(s) from the ${src} — all already exist in ${esc(div)}. Nothing new to import.</p>`; return; }
   // ---- change summary ----
   const byComm=new Map();
   fresh.forEach(r=>byComm.set(r.community_name,(byComm.get(r.community_name)||0)+1));
-  const newComms=[...byComm.keys()].filter(c=>!existingComms.has(lc(c)));
+  const newComms=[...new Set(fresh.filter(p=>!existingNums.has(String(p.community_num||"").trim())).map(p=>p.community_name))];
   importState.summary=`Imported ${fresh.length} new row(s) from ${src} → ${div} · ${byComm.size} communities${newComms.length?`, ${newComms.length} new`:""}`;
   importState.detail={ source:src, division:div, communities:byComm.size, newCommunities:newComms,
     added:fresh.map(r=>({community:r.community_name, plan:r.plan, elevation:r.elevation||"", trench:r.first_trench_date||""})) };
