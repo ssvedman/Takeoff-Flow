@@ -175,7 +175,7 @@ async function tryRestore(){
   try{ const { data } = await sb.auth.getSession(); if(data && data.session && data.session.user) await onSignedIn(data.session.user.email); }catch(e){}
 }
 
-/* ---------------- data layer ---------------- */
+/* --------------- data layer --------------- */
 async function loadDivision(div){
   if(DEMO){
     await ensureSeed();
