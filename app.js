@@ -147,8 +147,9 @@ async function verifyCode(){
     if(DEMO){
       if(code!==CFG.DEMO_CODE) throw new Error("Incorrect demo code.");
     }else{
-      const { error } = await sb.auth.verifyOtp({ email:state.email, token:code, type:"email" });
-      if(error) throw error;
+      // try the standard email OTP type; fall back to 'signup' for brand-new users
+      let { error } = await sb.auth.verifyOtp({ email:state.email, token:code, type:"email" });
+      if(error){ const r2 = await sb.auth.verifyOtp({ email:state.email, token:code, type:"signup" }); if(r2.error) throw error; }
     }
     await onSignedIn(state.email);
   }catch(e){ authMsg(prettyErr(e,"Couldn't verify the code."),"err"); }
@@ -903,7 +904,7 @@ function parseStartSchedule(wb, div){
   const want = div==="orlando" ? "Permit Log" : div==="tampa" ? "Start Log" : null;
   const sheet = (want && find(want)) || find("Permit Log") || find("Start Log") || find("START SCHEDULE") || wb.SheetNames[0];
   const rows=XLSX.utils.sheet_to_json(wb.Sheets[sheet],{defval:null});
-  const commNum=r=>{ const job=digits(r["Job"]); return job.length>=11 ? job.slice(0,7)+"0000" : (S(r["Comm"])||""); };
+  const commNum=r=>{ const job=digits(r["Job"]); return job.length>=7 ? job.slice(0,7)+"0000" : (S(r["Comm"])||""); };  // first 7 digits = community (handles model/spec jobs like 1116272S111)
   // Pre-count building sizes so plex lots become "{N}-PLEX" like the workbook does.
   // Count units per building INSTANCE = community + building + projected-start (matches the
   // workbook's COUNTIFS(Start, Bldg)); avoids over-counting a reused building id across phases.
