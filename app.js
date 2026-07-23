@@ -940,15 +940,18 @@ async function buildImportPreview(){
   const proposed=isFlow?parseFlowWorkbook(importState.wb):parseStartSchedule(importState.wb, div);
   const existRows=await existingFlow(div);   // always compare against the TARGET division's rows in the DB
   // A combination = community NUMBER + plan + elevation. Only genuinely new combinations are added.
-  const combo=(num,plan,ev)=>[String(num||"").trim(),lc(plan),lc(ev||"")].join("|");
+  // Plex plans are normalized (the "{N}-PLEX" unit count is unreliable between the log and the grid),
+  // so a plex is matched by community + "PLEX" + elevation.
+  const normPlan=p=>{ const s=lc(p); return /^\d+\s*-?\s*plex$/.test(s) ? "plex" : s; };
+  const combo=(num,plan,ev)=>[String(num||"").trim(),normPlan(plan),lc(ev||"")].join("|");
   const existing=new Set(existRows.map(r=>combo(r.community_num,r.plan,r.elevation)));
-  const existingNumPlan=new Set(existRows.map(r=>String(r.community_num||"").trim()+"|"+lc(r.plan)));  // for elevation-less plex
+  const existingNumPlan=new Set(existRows.map(r=>String(r.community_num||"").trim()+"|"+normPlan(r.plan)));  // for elevation-less plex
   const existingNums=new Set(existRows.map(r=>String(r.community_num||"").trim()));
   const numName={}; existRows.forEach(r=>{ const n=String(r.community_num||"").trim(); if(n && !(n in numName)) numName[n]=r.community_name; });
   const fresh=proposed.filter(p=>{
     const num=String(p.community_num||"").trim();
-    if(existing.has(combo(num,p.plan,p.elevation))) return false;                                   // exact community+plan+elevation exists
-    if(!String(p.elevation||"").trim() && existingNumPlan.has(num+"|"+lc(p.plan))) return false;    // no elevation in source → skip if community+plan already present
+    if(existing.has(combo(num,p.plan,p.elevation))) return false;                                        // community + plan + elevation exists
+    if(!String(p.elevation||"").trim() && existingNumPlan.has(num+"|"+normPlan(p.plan))) return false;   // no elevation in source → skip if community+plan already present
     return true;
   });
   // for communities already in the grid, keep the grid's canonical name (log names differ)
@@ -970,8 +973,10 @@ async function buildImportPreview(){
     ${newComms.length?`<div class="tiny" style="text-align:left;margin:6px 0 0">New communities: ${newComms.slice(0,12).map(esc).join(", ")}${newComms.length>12?` +${newComms.length-12} more`:""}</div>`:""}
     <div class="tiny" style="text-align:left;margin:6px 0 0">${isFlow?"All columns and dates come in as-is; calculated dates stay auto unless overridden.":"Trench dates are suggestions — refine them in the grid after publishing."} Existing rows are never overwritten.</div>
   </div>`;
-  h+=`<div class="prev-scroll"><table class="prev-table"><thead><tr><th>Community</th><th>Plan</th><th>Elevation</th><th>Suggested Trench</th></tr></thead><tbody>`;
-  fresh.slice(0,200).forEach(r=>h+=`<tr><td>${esc(r.community_name)}${newComms.includes(r.community_name)?' <span class="badge" style="background:var(--good)">new</span>':""}</td><td>${esc(r.plan)}</td><td>${esc(r.elevation||"")}</td><td>${esc(fmtDate(r.first_trench_date))}</td></tr>`);
+  const pnMap=(state.planNames&&state.planNames[div])||{};
+  const pnOf=r=>pnMap[String(r.plan==null?"":r.plan).trim().toUpperCase()]||"";
+  h+=`<div class="prev-scroll"><table class="prev-table"><thead><tr><th>Community</th><th>Comm #</th><th>Plan</th><th>Plan Name</th><th>Elevation</th><th>Suggested Trench</th></tr></thead><tbody>`;
+  fresh.slice(0,200).forEach(r=>h+=`<tr><td>${esc(r.community_name)}${newComms.includes(r.community_name)?' <span class="badge" style="background:var(--good)">new</span>':""}</td><td>${esc(r.community_num||"")}</td><td>${esc(r.plan)}</td><td>${esc(pnOf(r))}</td><td>${esc(r.elevation||"")}</td><td>${esc(fmtDate(r.first_trench_date))}</td></tr>`);
   h+=`</tbody></table></div>`;
   if(fresh.length>200) h+=`<p class="tiny" style="text-align:left">…and ${fresh.length-200} more.</p>`;
   h+=`<button class="btn" id="publishImport">Publish ${fresh.length} row(s) to ${esc(div)}</button>`;

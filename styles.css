@@ -201,9 +201,9 @@ td input.cellinput,td select.cellinput{width:100%;min-width:0;box-sizing:border-
 .modal-body{padding:16px 18px;overflow:auto}
 .modal-body input[type=text],.modal-body input[type=email]{width:100%}
 /* import change summary */
-.import-summary{border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin:0 0 12px;background:var(--blue-050)}
-.import-summary .is-row{font-size:14px;color:var(--navy);font-weight:600}
-.import-summary .is-n{display:inline-block;font-size:20px;font-weight:800;color:var(--blue);margin-right:4px}
+.import-summary{border:1px solid var(--line);border-left:4px solid var(--blue);border-radius:10px;padding:12px 14px;margin:0 0 12px;background:var(--card)}
+.import-summary .is-row{font-size:15px;color:var(--ink);font-weight:700;display:flex;align-items:center;gap:8px}
+.import-summary .is-n{display:inline-flex;align-items:center;justify-content:center;min-width:30px;height:26px;padding:0 8px;font-size:16px;font-weight:800;color:#fff;background:var(--blue);border-radius:20px}
 
 /* What's New button: highlight + dot when there are unviewed updates */
 .linkbtn.has-updates{position:relative;background:var(--warn);color:#fff}
