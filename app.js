@@ -942,9 +942,15 @@ async function buildImportPreview(){
   // A combination = community NUMBER + plan + elevation. Only genuinely new combinations are added.
   const combo=(num,plan,ev)=>[String(num||"").trim(),lc(plan),lc(ev||"")].join("|");
   const existing=new Set(existRows.map(r=>combo(r.community_num,r.plan,r.elevation)));
+  const existingNumPlan=new Set(existRows.map(r=>String(r.community_num||"").trim()+"|"+lc(r.plan)));  // for elevation-less plex
   const existingNums=new Set(existRows.map(r=>String(r.community_num||"").trim()));
   const numName={}; existRows.forEach(r=>{ const n=String(r.community_num||"").trim(); if(n && !(n in numName)) numName[n]=r.community_name; });
-  const fresh=proposed.filter(p=>!existing.has(combo(p.community_num,p.plan,p.elevation)));
+  const fresh=proposed.filter(p=>{
+    const num=String(p.community_num||"").trim();
+    if(existing.has(combo(num,p.plan,p.elevation))) return false;                                   // exact community+plan+elevation exists
+    if(!String(p.elevation||"").trim() && existingNumPlan.has(num+"|"+lc(p.plan))) return false;    // no elevation in source → skip if community+plan already present
+    return true;
+  });
   // for communities already in the grid, keep the grid's canonical name (log names differ)
   fresh.forEach(p=>{ const n=String(p.community_num||"").trim(); if(numName[n]) p.community_name=numName[n]; });
   const panel=$("previewPanel"), body=$("previewBody");
