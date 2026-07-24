@@ -312,3 +312,19 @@ table.grid tbody td .cell{display:block!important;height:22px!important;line-hei
 table.grid tbody td .cell .val{display:inline!important;white-space:nowrap!important}
 table.grid tbody td.rowhandle,table.grid tbody td.chkcell{padding:0!important;text-align:center}
 table.grid tbody td .chk{height:15px!important;width:15px!important;margin:0!important;vertical-align:middle}
+
+/* ---------- Temporary warning notice (code step) ---------- */
+.notice-warn{background:#fff5e6;border:1px solid #f0c66b;border-left:4px solid #c77700;
+  color:#8a5a00;border-radius:8px;padding:10px 12px;font-size:13px;line-height:1.45;margin-bottom:16px}
+.notice-warn a{color:#8a5a00;font-weight:700}
+[data-theme="dark"] .notice-warn{background:#33280f;border-color:#5a4415;color:#e9b866}
+[data-theme="dark"] .notice-warn a{color:#f0c66b}
+
+/* ---------- Site footer ---------- */
+.site-foot{display:flex;align-items:center;justify-content:center;gap:8px;
+  padding:18px 24px 26px;margin-top:8px;font-size:12px;color:var(--muted);
+  border-top:1px solid var(--line)}
+.site-foot .dot{color:var(--line)}
+.site-foot a{color:var(--blue);text-decoration:none;font-weight:600}
+.site-foot a:hover{text-decoration:underline}
+[data-theme="dark"] .site-foot{border-color:#20303f}

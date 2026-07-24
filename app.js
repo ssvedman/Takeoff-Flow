@@ -147,9 +147,8 @@ async function verifyCode(){
     if(DEMO){
       if(code!==CFG.DEMO_CODE) throw new Error("Incorrect demo code.");
     }else{
-      // try the standard email OTP type; fall back to 'signup' for brand-new users
-      let { error } = await sb.auth.verifyOtp({ email:state.email, token:code, type:"email" });
-      if(error){ const r2 = await sb.auth.verifyOtp({ email:state.email, token:code, type:"signup" }); if(r2.error) throw error; }
+      const { error } = await sb.auth.verifyOtp({ email:state.email, token:code, type:"email" });
+      if(error) throw error;
     }
     await onSignedIn(state.email);
   }catch(e){ authMsg(prettyErr(e,"Couldn't verify the code."),"err"); }
@@ -158,13 +157,13 @@ async function verifyCode(){
 
 async function onSignedIn(email){
   state.email=lc(email);
-  // resolve role: Supabase app_roles table is authoritative; config is the fallback/seed
+  // resolve role: Supabase tf_app_roles is authoritative; config is the fallback/seed
   let resolved=resolveRoleFromConfig(state.email);
   if(!DEMO){
     try{
       const { data } = await sb.from("tf_app_roles").select("role,divisions").eq("email",state.email).maybeSingle();
       if(data && data.role) resolved={ role:data.role, divisions:data.divisions||[] };
-    }catch(e){ console.warn("app_roles lookup failed, using config fallback",e); }
+    }catch(e){ console.warn("role lookup failed, using config fallback",e); }
   }
   state.role=resolved.role; state.roleDivs=resolved.divisions||[];
   bootApp();
@@ -308,7 +307,6 @@ const FLOW_COLS = [
   {f:"loc_upload",     h:"LOC Upload",     type:"date", calc:true},
   {f:"tasks_start",    h:"Tasks Start",    type:"date", calc:true},
   {f:"first_trench_date", h:"First Trench Date", type:"date"},
-  {f:"estimating_notes", h:"Estimating Notes", type:"text", long:true},
   {f:"notes",          h:"Notes",          type:"text", long:true}
 ];
 function flowRows(){
@@ -423,6 +421,7 @@ function renderBudgets(tb,area){
     const st=state.status[r.id]||{sim_reviewed:false,sent_to_loc:false};
     h+=`<tr><td><span class="cell"><span class="val">${esc(r.community_name||'')}</span></span></td>`
       + `<td><span class="cell"><span class="val">${esc(r.plan||'')}</span></span></td>`
+      + `<td><span class="cell"><span class="val">${esc(planName(r))}</span></span></td>`
       + `<td><span class="cell"><span class="val">${esc(r.elevation||'')}</span></span></td>`
       + `<td class="calc"><span class="cell"><span class="val">${esc(fmtDate(effective(r,"released")))}</span></span></td>`;
     state.cols.forEach(c=>{
@@ -452,6 +451,7 @@ function budgetCols(){
   const list=[
     {f:"community_name",h:"Community",disp:r=>r.community_name||"",raw:r=>r.community_name||""},
     {f:"plan",h:"Plan",disp:r=>r.plan||"",raw:r=>r.plan||""},
+    {f:"plan_name",h:"Plan Name",disp:r=>planName(r),raw:r=>planName(r)},
     {f:"elevation",h:"Elev",disp:r=>r.elevation||"",raw:r=>r.elevation||""},
     {f:"released",h:"Estimating Release",cls:"calc",calc:true,disp:r=>fmtDate(effective(r,"released")),raw:r=>effective(r,"released")||""}
   ];
@@ -819,8 +819,8 @@ function exportCSV(){
   let cols,rows,name;
   if(state.view==="flow"){ cols=FLOW_COLS.map(c=>c.h); name="flow_of_takeoffs";
     rows=flowRows().map(r=>FLOW_COLS.map(c=>c.get?c.get(r):(c.calc?fmtDate(effective(r,c.f)):(c.type==="date"?fmtDate(r[c.f]):r[c.f])))); }
-  else if(state.view==="budgets"){ cols=["Community","Plan","Elev","Estimating Release",...state.cols.map(c=>c.name),"SIM Reviewed","Sent to LOC","Pricing Due","LOC Upload","Tasks Start","Trench Date"]; name="pending_budgets";
-    rows=flowRows().map(r=>{ const st=state.status[r.id]||{}; return [r.community_name,r.plan,r.elevation,fmtDate(effective(r,"released")),
+  else if(state.view==="budgets"){ cols=["Community","Plan","Plan Name","Elev","Estimating Release",...state.cols.map(c=>c.name),"SIM Reviewed","Sent to LOC","Pricing Due","LOC Upload","Tasks Start","Trench Date"]; name="pending_budgets";
+    rows=flowRows().map(r=>{ const st=state.status[r.id]||{}; return [r.community_name,r.plan,planName(r),r.elevation,fmtDate(effective(r,"released")),
       ...state.cols.map(c=>state.checks[r.id+"::"+c.id]?"Y":""), st.sim_reviewed?"Y":"", st.sent_to_loc?"Y":"", fmtDate(workday(r.first_trench_date,-30,true)), fmtDate(effective(r,"loc_upload")), fmtDate(effective(r,"tasks_start")), fmtDate(r.first_trench_date)]; }); }
   else if(state.view==="changes"){ cols=CHG_COLS.map(c=>c.h); name="takeoff_changes";
     rows=chgRows().map(r=>CHG_COLS.map(c=>c.type==="check"?(r[c.f]?"Y":""):(c.type==="date"?fmtDate(r[c.f]):r[c.f]))); }

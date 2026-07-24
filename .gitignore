@@ -12,3 +12,6 @@ data/
 
 # Internal setup notes — keep local, don't publish
 SETUP.md
+
+# Supabase email template — configured in the Supabase dashboard, not shipped
+otp_email_template.html
