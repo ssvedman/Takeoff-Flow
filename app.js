@@ -76,6 +76,33 @@ function toggleTheme(){ const isDark=document.documentElement.getAttribute("data
   document.documentElement.setAttribute("data-theme",next); try{localStorage.setItem("tf_theme",next);}catch(e){}
   const b=$("themeBtn"); if(b) b.textContent=next==="dark"?"Light":"Dark"; }
 
+/* ---------------- per-user UI memory (division, tab, sorts, column filters) ----------------
+   Saved to localStorage, namespaced per email so a shared browser doesn't mix people up.
+   colFilters hold Set objects, which aren't JSON-serializable, so they're stored as arrays. */
+function prefsKey(){ return "tf_prefs:"+(state.email||"anon"); }
+function loadPrefs(){ try{ return JSON.parse(localStorage.getItem(prefsKey())||"{}")||{}; }catch(e){ return {}; } }
+function savePrefs(){
+  if(!state.email) return;
+  const cf={};
+  for(const v in state.colFilters){ const m=state.colFilters[v]||{}, out={};
+    for(const f in m){ if(m[f] instanceof Set) out[f]=[...m[f]]; }
+    if(Object.keys(out).length) cf[v]=out;
+  }
+  try{ localStorage.setItem(prefsKey(), JSON.stringify({ divKey:state.divKey, view:state.view, sort:state.sort, colFilters:cf })); }catch(e){}
+}
+function applyPrefs(){
+  const p=loadPrefs();
+  if(p.divKey && CFG.DIVISIONS.some(d=>d.key===p.divKey)) state.divKey=p.divKey;
+  if(["flow","budgets","changes","todo"].includes(p.view)) state.view=p.view;
+  if(p.sort && typeof p.sort==="object") state.sort=p.sort;
+  if(p.colFilters && typeof p.colFilters==="object"){
+    const cf={};
+    for(const v in p.colFilters){ const m=p.colFilters[v]||{}; cf[v]={};
+      for(const f in m){ if(Array.isArray(m[f])) cf[v][f]=new Set(m[f]); } }
+    state.colFilters=cf;
+  }
+}
+
 /* ---------------- roles / permissions ---------------- */
 function resolveRoleFromConfig(email){
   const r = CFG.ROLES[lc(email)];
@@ -222,6 +249,42 @@ async function saveRow(table, row){
   if(DEMO){ const arr=MEM[table]; const i=arr.findIndex(x=>x.id===row.id); if(i>=0) arr[i]=row; else arr.push(row); return; }
   const { error } = await sb.from(table).upsert(row); if(error){ console.error(error); toast("Save failed: "+error.message,"err"); }
 }
+/* ---- field-level saves (conflict protection) ----
+   The app has no live sync, so a full-row upsert would silently overwrite any column
+   another person changed since we loaded. saveField writes ONE column and guards it
+   with a compare-and-set on that column's prior value: it never clobbers a different
+   field, and it detects (rather than overwrites) a change to the SAME cell — returning
+   the current value so the UI can show the latest instead of losing someone's edit.
+   savePatch writes a few columns at once (no guard, low-stakes toggles) but still
+   leaves every other column untouched. */
+function sameVal(a,b){ return a===b || (a==null&&b==null) || String(a??"")===String(b??""); }
+async function saveField(table, id, field, newVal, oldVal){
+  const meta={ updated_at:new Date().toISOString(), updated_by:state.email };
+  if(DEMO){ const row=(MEM[table]||[]).find(x=>x.id===id); if(row) Object.assign(row,{[field]:newVal},meta); return {ok:true}; }
+  let q=sb.from(table).update({[field]:newVal, ...meta}).eq("id",id);
+  q = (oldVal==null) ? q.is(field,null) : q.eq(field,oldVal);
+  const { data, error } = await q.select();
+  if(error){
+    // guard filter can choke on unusual text values — fall back to a plain field-level
+    // write so the save still succeeds (and still won't clobber other columns).
+    const { error:e2 } = await sb.from(table).update({[field]:newVal, ...meta}).eq("id",id);
+    if(e2){ console.error(e2); toast("Save failed: "+e2.message,"err"); return {ok:false, current:oldVal}; }
+    return {ok:true};
+  }
+  if(data && data.length===1) return {ok:true};
+  // 0 rows changed → the cell moved under us, or it already holds the value we wanted
+  const { data:fresh } = await sb.from(table).select(field+",updated_by").eq("id",id).maybeSingle();
+  const current = fresh ? fresh[field] : oldVal;
+  if(sameVal(current,newVal)) return {ok:true};
+  const who = (fresh&&fresh.updated_by) ? " by "+String(fresh.updated_by).split("@")[0] : "";
+  toast("Not saved — this cell was just changed"+who+". Showing the latest value; re-enter your change to keep it.","err");
+  return {ok:false, current};
+}
+async function savePatch(table, id, patch){
+  const body={ ...patch, updated_at:new Date().toISOString(), updated_by:state.email };
+  if(DEMO){ const row=(MEM[table]||[]).find(x=>x.id===id); if(row) Object.assign(row,body); return; }
+  const { error } = await sb.from(table).update(body).eq("id",id); if(error){ console.error(error); toast("Save failed: "+error.message,"err"); }
+}
 async function deleteRow(table, id){
   if(DEMO){ MEM[table]=MEM[table].filter(x=>x.id!==id); return; }
   const { error } = await sb.from(table).delete().eq("id",id); if(error){ console.error(error); toast("Delete failed: "+error.message,"err"); }
@@ -251,7 +314,10 @@ function bootApp(){
   // division dropdown
   const sel=$("divisionSel"); sel.innerHTML="";
   CFG.DIVISIONS.forEach(d=>{ const o=document.createElement("option"); o.value=d.key; o.textContent=d.label; sel.appendChild(o); });
-  state.divKey = DEMO ? "orlando" : CFG.DIVISIONS[0].key; sel.value=state.divKey;
+  state.divKey = DEMO ? "orlando" : CFG.DIVISIONS[0].key;
+  applyPrefs();                    // restore last division, tab, sorts, and column filters
+  sel.value=state.divKey;
+  document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("active", t.dataset.view===state.view));
   sel.onchange=async()=>{ state.divKey=sel.value; await loadDivision(state.divKey); render(); };
   // tabs
   document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>{ document.querySelectorAll(".tab").forEach(x=>x.classList.remove("active")); t.classList.add("active"); state.view=t.dataset.view; state.filter=""; $("globalSearch").value=""; render(); });
@@ -287,6 +353,7 @@ function render(){
   else if(state.view==="todo")    renderTodo(tb,area);
   area.querySelectorAll(".grid-wrap").forEach((el,i)=>{ if(sc[i]){ el.scrollLeft=sc[i][0]; el.scrollTop=sc[i][1]; } });
   tb.querySelectorAll("[data-export]").forEach(b=>b.onclick=exportCSV);
+  savePrefs();   // remember division, tab, sorts, and column filters for next visit
 }
 function matchFilter(str){ return !state.filter || lc(str).includes(state.filter); }
 
@@ -355,8 +422,11 @@ function renderFlow(tb,area){
 async function saveFlowCell(id, field, type, value){
   const r=state.flow.find(x=>x.id===id); if(!r) return;
   if(field==="plan_name"){ await setPlanName(r, value); return; }   // maps to tf_plan_names, not a per-row value
-  r[field]= value===""?null:value;
-  await saveRow("flow_rows", r);
+  const oldVal = r[field]===undefined?null:r[field];
+  const newVal = value===""?null:value;
+  r[field]=newVal;
+  const res = await saveField("flow_rows", id, field, newVal, oldVal);
+  if(res && res.ok===false && "current" in res) r[field]=res.current; // show the latest on conflict
   render(); // recompute dependent calc columns
 }
 /* Set/rename a plan's name. Updates the tf_plan_names lookup (so every row in that
@@ -573,11 +643,19 @@ function renderChanges(tb,area){
   area.innerHTML=h;
   bindGrid(area, saveChgCell);
   bindHeader(area, cols, chgRows());
-  area.querySelectorAll("[data-chgchk]").forEach(cb=>cb.onchange=async()=>{ const r=state.changes.find(x=>x.id===cb.dataset.chgchk); if(!r)return; const f=cb.dataset.f; r[f]=cb.checked; if(f==="complete"){ r.completed_date = cb.checked ? (r.completed_date||todayIso()) : null; } await saveRow("takeoff_changes",r); render(); });
+  area.querySelectorAll("[data-chgchk]").forEach(cb=>cb.onchange=async()=>{ const r=state.changes.find(x=>x.id===cb.dataset.chgchk); if(!r)return; const f=cb.dataset.f; r[f]=cb.checked; const patch={[f]:cb.checked}; if(f==="complete"){ r.completed_date = cb.checked ? (r.completed_date||todayIso()) : null; patch.completed_date=r.completed_date; } await savePatch("takeoff_changes",r.id,patch); render(); });
   area.querySelectorAll("[data-delchg]").forEach(b=>b.onclick=async()=>{ if(!confirm("Delete this request?"))return; const id=b.dataset.delchg; await deleteRow("takeoff_changes",id); state.changes=state.changes.filter(x=>x.id!==id); render(); });
   const add=$("addChg"); if(add) add.onclick=async()=>{ const r={ id:uid(), division:state.divKey, req_date:todayIso(), requestor:state.email.split("@")[0], urgent:false, complete:false, created_by:state.email }; state.changes.unshift(r); await saveRow("takeoff_changes",r); render(); };
 }
-async function saveChgCell(id,field,type,value){ const r=state.changes.find(x=>x.id===id); if(!r)return; r[field]=value===""?null:value; await saveRow("takeoff_changes",r); render(); }
+async function saveChgCell(id,field,type,value){
+  const r=state.changes.find(x=>x.id===id); if(!r)return;
+  const oldVal = r[field]===undefined?null:r[field];
+  const newVal = value===""?null:value;
+  r[field]=newVal;
+  const res = await saveField("takeoff_changes", id, field, newVal, oldVal);
+  if(res && res.ok===false && "current" in res) r[field]=res.current;
+  render();
+}
 
 /* ===================================================================
    TAB 4 · TO-DO LIST  (auto-derived: upcoming trench dates)
