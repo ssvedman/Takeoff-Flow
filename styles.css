@@ -313,6 +313,23 @@ table.grid tbody td .cell .val{display:inline!important;white-space:nowrap!impor
 table.grid tbody td.rowhandle,table.grid tbody td.chkcell{padding:0!important;text-align:center}
 table.grid tbody td .chk{height:15px!important;width:15px!important;margin:0!important;vertical-align:middle}
 
+/* ---------- Excel-style sheet selection (Flow / Changes) ---------- */
+table.grid tbody td .cell.cell-selected{ background:var(--blue-050); }
+table.grid tbody td .cell.cell-active{ background:var(--blue-050); box-shadow:inset 0 0 0 2px var(--blue); }
+table.grid tbody td .cell.fill-preview{ background:var(--blue-050); box-shadow:inset 0 0 0 1px #9cc2ee; }
+table.grid tbody td.handle-td{ overflow:visible!important; position:relative; }
+.fill-handle{ position:absolute; right:-3px; bottom:-3px; width:7px; height:7px; background:var(--blue); border:1px solid #fff; cursor:crosshair; z-index:6; }
+[data-theme="dark"] table.grid tbody td .cell.cell-selected{ background:#0f2942; }
+[data-theme="dark"] table.grid tbody td .cell.cell-active{ background:#12314f; }
+[data-theme="dark"] table.grid tbody td .cell.fill-preview{ background:#0f2942; box-shadow:inset 0 0 0 1px #24405e; }
+[data-theme="dark"] .fill-handle{ border-color:#0c1929; }
+
+/* ---------- Live-status indicator ---------- */
+.live-dot{ font-size:11.5px; color:var(--muted); display:inline-flex; align-items:center; gap:6px; }
+.live-dot::before{ content:""; width:8px; height:8px; border-radius:50%; background:#c0c8d2; }
+.live-dot.on{ color:var(--good); } .live-dot.on::before{ background:var(--good); box-shadow:0 0 0 3px rgba(26,143,87,.15); }
+.live-dot.off{ color:var(--warn); } .live-dot.off::before{ background:var(--warn); }
+
 /* ---------- Temporary warning notice (code step) ---------- */
 .notice-warn{background:#fff5e6;border:1px solid #f0c66b;border-left:4px solid #c77700;
   color:#8a5a00;border-radius:8px;padding:10px 12px;font-size:13px;line-height:1.45;margin-bottom:16px}

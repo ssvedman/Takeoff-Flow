@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Lennar Takeoff Flow</title>
 <link rel="icon" href="logo.svg">
-<link rel="stylesheet" href="styles.css?v=42">
+<link rel="stylesheet" href="styles.css?v=45">
 </head>
 <body>
 
@@ -52,6 +52,7 @@
     <div class="subbar">
       <div id="banner" class="banner"></div>
       <div class="subbar-right">
+        <span id="liveDot" class="live-dot" title="Live updates connection">Connecting…</span>
         <span id="lastUpdateNote" class="last-update"></span>
         <button class="linkbtn" id="whatsNewBtn" title="Recent updates">What's New</button>
       </div>
@@ -116,7 +117,7 @@
 <!-- All data (flow rows, budgets, checkboxes, changes, plan-name lookup) is served.
      from Supabase — nothing operational is bundled in this repo. The data/*.js and
      seed_*.sql files are git-ignored (used locally to generate the one-time seed SQL). -->
-<script src="config.js?v=42"></script>
-<script src="app.js?v=42"></script>
+<script src="config.js?v=45"></script>
+<script src="app.js?v=45"></script>
 </body>
 </html>

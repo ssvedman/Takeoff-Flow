@@ -329,7 +329,7 @@ function bootApp(){
   $("whatsNewBtn").onclick=openWhatsNew;
   $("logoutBtn").onclick=async()=>{ if(!DEMO&&sb) await sb.auth.signOut(); location.reload(); };
   $("globalSearch").oninput=e=>{ state.filter=lc(e.target.value); render(); };
-  loadPlanNames().then(()=>loadDivision(state.divKey)).then(()=>{ render(); refreshWhatsNewBadge(); });
+  loadPlanNames().then(()=>loadDivision(state.divKey)).then(()=>{ render(); refreshWhatsNewBadge(); startRealtime(); });
 }
 function showDash(){ $("admin").classList.add("hidden"); $("dashboard").classList.remove("hidden"); $("dashLink").classList.add("hidden"); if($("adminLink").classList.contains("hidden")===false){} render(); }
 function setBanner(){
@@ -388,7 +388,7 @@ function renderFlow(tb,area){
        <button class="btn mini ghost" id="importBtn">Import Start Schedule…</button>`:"")
     + `<button class="btn mini ghost" data-export>&#8681; Export CSV</button>`
     + `<span class="grow"></span>`
-    + `<span class="section-note" style="margin:0">Click a header to sort; use the filter row to filter. Blue columns auto-calculate — click a cell to override.</span>`;
+    + `<span class="section-note" style="margin:0">Works like Excel: click to select, drag or Shift-click for a range; double-click, Enter, or just type to edit; Ctrl+D fill down, Ctrl+R fill right, Ctrl+C/Ctrl+V copy/paste, Delete to clear, or drag the corner handle. Blue columns auto-calculate.</span>`;
   let h=`<div class="grid-wrap"><table class="grid"><thead>${theadHTML(cols,canEd)}</thead><tbody>`;
   if(!rows.length) h+=`<tr><td colspan="${FLOW_COLS.length+(canEd?1:0)}"><div class="empty">No rows yet. ${canEd?"Add a row or import the Start Schedule.":""}</div></td></tr>`;
   rows.forEach(r=>{
@@ -837,12 +837,20 @@ function cellHTML(id, c, disp, rawv, allow){
 
 /* ---------------- editable-cell engine (delegated) ---------------- */
 function bindGrid(container, commit){
-  container.addEventListener("click", e=>{
-    const lc=e.target.closest(".cell.longcell");
-    if(lc){ openTextModal(lc, commit); return; }
-    const span=e.target.closest(".cell.editable"); if(!span || span._editing) return;
-    startEdit(span, commit);
-  });
+  // Budgets / To-Do keep the simple click-to-edit behavior.
+  if(state.view!=="flow" && state.view!=="changes"){
+    container.addEventListener("click", e=>{
+      const lc=e.target.closest(".cell.longcell"); if(lc){ openTextModal(lc, commit); return; }
+      const span=e.target.closest(".cell.editable"); if(span && !span._editing) startEdit(span, commit);
+    });
+    return;
+  }
+  // Flow / Changes use the Excel-style sheet model. Selection persists across renders.
+  const viewChanged = sheet.view!==state.view;
+  sheet.view=state.view; sheet.container=container; sheet.commit=commit; sheet.drag=false; sheet.fill=false; sheet.fillTo=null;
+  if(viewChanged){ sheet.anchor=null; sheet.focus=null; }
+  attachSheetMouse(container);
+  clampSel(); paintSelection();
 }
 /* full-text viewer / editor for long cells */
 function openTextModal(cell, commit){
@@ -868,7 +876,7 @@ function openTextModal(cell, commit){
   if(editable){ const ta=ov.querySelector("#txtArea"); ta.focus();
     ov.querySelector("#txtSave").onclick=async()=>{ await commit(id, field, "text", ta.value); close(); }; }
 }
-function startEdit(span, commit){
+function startEdit(span, commit, after, prefill){
   const type=span.dataset.type, id=span.dataset.id, field=span.dataset.field;
   const cur = type==="date" ? invFmt(span.querySelector(".val").textContent)
             : (span.dataset.raw!==undefined ? span.dataset.raw : span.querySelector(".val").textContent);
@@ -876,18 +884,219 @@ function startEdit(span, commit){
   const cellW=Math.round(span.getBoundingClientRect().width);   // lock editor to current cell width (no column expansion)
   const inp=document.createElement("input");
   inp.className="cellinput"; inp.type = type==="date"?"date":(type==="num"?"number":"text");
-  inp.value = type==="date" ? (cur||"") : (cur||"");
+  inp.value = (prefill!=null && type!=="date") ? String(prefill) : (cur||"");
   if(cellW>0) inp.style.width=cellW+"px";
-  span.innerHTML=""; span.appendChild(inp); inp.focus(); if(inp.select) try{inp.select();}catch(e){}
-  let done=false;
+  span.innerHTML=""; span.appendChild(inp); inp.focus();
+  if(prefill==null){ if(inp.select) try{inp.select();}catch(e){} } else { try{ inp.setSelectionRange(inp.value.length,inp.value.length); }catch(e){} }
+  let done=false, dir=null;
   const finish=async(save)=>{
     if(done) return; done=true;
     const val=inp.value;
-    if(save){ await commit(id, field, type, val); }
-    else { render(); }
+    if(save){ await commit(id, field, type, val); if(after) after(dir); }
+    else { render(); if(after) after(null); }
   };
   inp.addEventListener("blur", ()=>finish(true));
-  inp.addEventListener("keydown", ev=>{ if(ev.key==="Enter"){ ev.preventDefault(); finish(true);} else if(ev.key==="Escape"){ finish(false);} });
+  inp.addEventListener("keydown", ev=>{
+    if(ev.key==="Enter"){ ev.preventDefault(); dir=ev.shiftKey?"up":"down"; finish(true); }
+    else if(ev.key==="Tab"){ ev.preventDefault(); dir=ev.shiftKey?"left":"right"; finish(true); }
+    else if(ev.key==="Escape"){ dir=null; finish(false); }
+  });
+}
+
+/* ================= Excel-style sheet (Flow / Changes) =================
+   Single click selects a cell; click-drag or Shift-click selects a rectangle. Double
+   click, Enter, F2, or just typing edits the active cell (Enter/Tab commit and move).
+   Arrow keys move (Shift+arrow extends). Ctrl+C copies, Ctrl+V pastes a block, Ctrl+D
+   fills down, Ctrl+R fills right, Delete clears. Drag the corner handle to fill down/up.
+   Every write goes through the field-level save, so conflict protection + RLS apply. */
+let sheet={ view:null, container:null, commit:null, anchor:null, focus:null, drag:false, fill:false, fillTo:null };
+function shRows(c){ return [...c.querySelectorAll("table.grid tbody tr")].filter(tr=>tr.querySelector(".cell")); }
+function shDims(c){ const rows=shRows(c); return { R:rows.length, C:rows[0]?rows[0].querySelectorAll(".cell").length:0 }; }
+function shCell(c,r,cc){ const tr=shRows(c)[r]; return tr?(tr.querySelectorAll(".cell")[cc]||null):null; }
+function shCoord(cell){ const tr=cell.closest("tr"); const r=shRows(sheet.container).indexOf(tr); const c=[...tr.querySelectorAll(".cell")].indexOf(cell); return (r<0||c<0)?null:{r,c}; }
+function selRect(){ const a=sheet.anchor, f=sheet.focus||sheet.anchor; return { r1:Math.min(a.r,f.r), c1:Math.min(a.c,f.c), r2:Math.max(a.r,f.r), c2:Math.max(a.c,f.c) }; }
+function clampSel(){ const {R,C}=shDims(sheet.container); if(!sheet.anchor) return; if(R===0||C===0){ sheet.anchor=sheet.focus=null; return; }
+  const cl=p=>{ p.r=Math.max(0,Math.min(p.r,R-1)); p.c=Math.max(0,Math.min(p.c,C-1)); }; cl(sheet.anchor); if(sheet.focus) cl(sheet.focus); }
+function normVal(type, v){ v=(v==null?"":String(v)).trim();
+  if(type!=="date") return v;
+  if(/^\d{4}-\d{2}-\d{2}$/.test(v)) return v;
+  const inv=invFmt(v); if(inv) return inv;
+  const d=new Date(v); return isNaN(d.getTime())?"":d.toISOString().slice(0,10);
+}
+function cellSaveVal(cell){ const arr=sheet.view==="flow"?state.flow:state.changes; const r=arr.find(x=>x.id===cell.dataset.id); const v=r?r[cell.dataset.field]:null; return v==null?"":v; }
+function paintSelection(){
+  const c=sheet.container; if(!c) return;
+  c.querySelectorAll(".cell.cell-active,.cell.cell-selected,.cell.fill-preview").forEach(x=>x.classList.remove("cell-active","cell-selected","fill-preview"));
+  c.querySelectorAll("td.handle-td").forEach(td=>td.classList.remove("handle-td"));
+  c.querySelectorAll(".fill-handle").forEach(x=>x.remove());
+  if(!sheet.anchor) return;
+  const s=selRect();
+  for(let r=s.r1;r<=s.r2;r++) for(let cc=s.c1;cc<=s.c2;cc++){ const el=shCell(c,r,cc); if(el) el.classList.add("cell-selected"); }
+  const act=shCell(c,sheet.anchor.r,sheet.anchor.c); if(act) act.classList.add("cell-active");
+  if(sheet.fill && sheet.fillTo!=null){
+    const a=Math.min(sheet.fillTo,s.r1), b=Math.max(sheet.fillTo,s.r2);
+    for(let r=a;r<=b;r++){ if(r>=s.r1 && r<=s.r2) continue; for(let cc=s.c1;cc<=s.c2;cc++){ const el=shCell(c,r,cc); if(el) el.classList.add("fill-preview"); } }
+  }
+  const br=shCell(c,s.r2,s.c2); if(br){ const td=br.parentElement; td.classList.add("handle-td"); const h=document.createElement("div"); h.className="fill-handle"; td.appendChild(h); }
+}
+function moveActive(dir, extend){
+  const {R,C}=shDims(sheet.container); if(R===0||C===0) return;
+  if(!sheet.anchor){ sheet.anchor={r:0,c:0}; sheet.focus={r:0,c:0}; paintSelection(); return; }
+  const base=extend?(sheet.focus||{r:sheet.anchor.r,c:sheet.anchor.c}):sheet.anchor;
+  let r=base.r, c=base.c;
+  if(dir==="down") r++; else if(dir==="up") r--; else if(dir==="right") c++; else if(dir==="left") c--;
+  r=Math.max(0,Math.min(r,R-1)); c=Math.max(0,Math.min(c,C-1));
+  if(extend){ sheet.focus={r,c}; } else { sheet.anchor={r,c}; sheet.focus={r,c}; }
+  paintSelection();
+  const el=shCell(sheet.container,r,c); if(el) el.scrollIntoView({block:"nearest",inline:"nearest"});
+}
+function editActive(prefill){
+  const cell=sheet.anchor?shCell(sheet.container,sheet.anchor.r,sheet.anchor.c):null; if(!cell) return;
+  if(cell.matches(".longcell")){ if(cell.matches(".editallowed")) openTextModal(cell, sheet.commit); return; }
+  if(!cell.matches(".editable")) return;
+  startEdit(cell, sheet.commit, dir=>{ if(dir) moveActive(dir,false); else paintSelection(); }, prefill);
+}
+async function applyBulk(view, field, type, edits){
+  if(!edits.length) return;
+  if(edits.length>500){ toast("That's over 500 cells — please work in a smaller range.","err"); return; }
+  const table=view==="flow"?"flow_rows":"takeoff_changes";
+  const arr=view==="flow"?state.flow:state.changes;
+  let conflicts=0;
+  for(const {id,value} of edits){
+    const r=arr.find(x=>x.id===id); if(!r) continue;
+    if(view==="flow" && field==="plan_name"){ await setPlanName(r, value); continue; }
+    const oldVal=r[field]===undefined?null:r[field];
+    const newVal=(value===""||value==null)?null:value;
+    if(sameVal(oldVal,newVal)) continue;
+    r[field]=newVal;
+    const res=await saveField(table,id,field,newVal,oldVal);
+    if(res && res.ok===false && "current" in res){ r[field]=res.current; conflicts++; }
+  }
+  render();
+  if(conflicts) toast(conflicts+" cell(s) weren't saved — changed by someone else. Latest values shown.","err");
+}
+function collectEdits(cells){ const byField={};
+  cells.forEach(({el,value})=>{ if(!el||!el.matches(".editable,.editallowed")) return; const field=el.dataset.field,type=el.dataset.type||"text";
+    (byField[field]=byField[field]||{type,list:[]}).list.push({id:el.dataset.id, value:normVal(type,value)}); });
+  return byField;
+}
+async function runEdits(byField){ for(const f in byField) await applyBulk(sheet.view,f,byField[f].type,byField[f].list); }
+async function clearSelection(){ const s=selRect(), cells=[];
+  for(let r=s.r1;r<=s.r2;r++) for(let cc=s.c1;cc<=s.c2;cc++){ const el=shCell(sheet.container,r,cc); if(el) cells.push({el,value:""}); }
+  await runEdits(collectEdits(cells)); }
+async function fillDir(dir){ const s=selRect(), cells=[];
+  if(dir==="down"){ if(s.r2<=s.r1) return; for(let cc=s.c1;cc<=s.c2;cc++){ const src=shCell(sheet.container,s.r1,cc); if(!src) continue; const v=cellSaveVal(src);
+      for(let r=s.r1+1;r<=s.r2;r++) cells.push({el:shCell(sheet.container,r,cc),value:v}); } }
+  else { if(s.c2<=s.c1) return; for(let r=s.r1;r<=s.r2;r++){ const src=shCell(sheet.container,r,s.c1); if(!src) continue; const v=cellSaveVal(src);
+      for(let cc=s.c1+1;cc<=s.c2;cc++) cells.push({el:shCell(sheet.container,r,cc),value:v}); } }
+  await runEdits(collectEdits(cells)); }
+async function doHandleFill(toRow){ if(toRow==null||!sheet.anchor) return; const s=selRect(), h=s.r2-s.r1+1, cells=[];
+  if(toRow>s.r2){ for(let cc=s.c1;cc<=s.c2;cc++) for(let r=s.r2+1;r<=toRow;r++){ const src=shCell(sheet.container,s.r1+((r-s.r1)%h),cc); cells.push({el:shCell(sheet.container,r,cc),value:cellSaveVal(src)}); } sheet.anchor={r:s.r1,c:s.c1}; sheet.focus={r:toRow,c:s.c2}; }
+  else if(toRow<s.r1){ for(let cc=s.c1;cc<=s.c2;cc++) for(let r=toRow;r<s.r1;r++){ const src=shCell(sheet.container,s.r1+(((r-toRow)%h)),cc); cells.push({el:shCell(sheet.container,r,cc),value:cellSaveVal(src)}); } sheet.anchor={r:toRow,c:s.c1}; sheet.focus={r:s.r2,c:s.c2}; }
+  await runEdits(collectEdits(cells)); }
+function selTSV(){ const s=selRect(), lines=[];
+  for(let r=s.r1;r<=s.r2;r++){ const parts=[]; for(let cc=s.c1;cc<=s.c2;cc++){ const el=shCell(sheet.container,r,cc); parts.push(el?(el.querySelector(".val")?.textContent||""):""); } lines.push(parts.join("\t")); }
+  return lines.join("\n"); }
+async function doPaste(txt){ const c=sheet.container; if(!sheet.anchor) return;
+  const matrix=txt.replace(/\r\n?/g,"\n").split("\n"); if(matrix.length && matrix[matrix.length-1]==="") matrix.pop();
+  const {R,C}=shDims(c), sr=sheet.anchor.r, sc=sheet.anchor.c, cells=[];
+  matrix.forEach((line,ri)=>line.split("\t").forEach((val,ci)=>{ const r=sr+ri, cc=sc+ci; if(r>=R||cc>=C) return; cells.push({el:shCell(c,r,cc),value:val}); }));
+  const pr=matrix.length-1, pc=Math.max(...matrix.map(l=>l.split("\t").length))-1;
+  sheet.anchor={r:sr,c:sc}; sheet.focus={r:Math.min(R-1,sr+pr),c:Math.min(C-1,sc+pc)};
+  await runEdits(collectEdits(cells)); }
+function attachSheetMouse(c){
+  c.addEventListener("mousedown", e=>{
+    if(e.target.closest(".fill-handle")){ e.preventDefault(); sheet.fill=true; sheet.fillTo=selRect().r2; return; }
+    const cell=e.target.closest(".cell"); if(!cell) return; const co=shCoord(cell); if(!co) return;
+    e.preventDefault();
+    if(e.shiftKey && sheet.anchor){ sheet.focus=co; } else { sheet.anchor=co; sheet.focus=co; sheet.drag=true; }
+    paintSelection();
+  });
+  c.addEventListener("mouseover", e=>{
+    if(!sheet.drag && !sheet.fill) return;
+    const cell=e.target.closest(".cell"); if(!cell) return; const co=shCoord(cell); if(!co) return;
+    if(sheet.fill){ sheet.fillTo=co.r; } else { sheet.focus=co; }
+    paintSelection();
+  });
+  c.addEventListener("dblclick", e=>{ const cell=e.target.closest(".cell"); if(!cell) return; const co=shCoord(cell); if(co){ sheet.anchor=co; sheet.focus=co; } editActive(); });
+}
+function sheetActive(){ return sheet.container && (state.view==="flow"||state.view==="changes") && !isEditingOpen(); }
+function onSheetKey(e){
+  if(!sheetActive()) return;
+  const ae=document.activeElement; if(ae && (ae.tagName==="INPUT"||ae.tagName==="TEXTAREA"||ae.tagName==="SELECT")) return;
+  const k=e.key, ctrl=e.ctrlKey||e.metaKey;
+  if(!sheet.anchor && !k.startsWith("Arrow")) return;
+  if(k==="ArrowUp"){ e.preventDefault(); moveActive("up",e.shiftKey); }
+  else if(k==="ArrowDown"){ e.preventDefault(); moveActive("down",e.shiftKey); }
+  else if(k==="ArrowLeft"){ e.preventDefault(); moveActive("left",e.shiftKey); }
+  else if(k==="ArrowRight"){ e.preventDefault(); moveActive("right",e.shiftKey); }
+  else if(k==="Tab"){ e.preventDefault(); moveActive(e.shiftKey?"left":"right",false); }
+  else if(k==="Enter"||k==="F2"){ e.preventDefault(); editActive(); }
+  else if(k==="Escape"){ sheet.focus={r:sheet.anchor.r,c:sheet.anchor.c}; paintSelection(); }
+  else if(k==="Delete"||k==="Backspace"){ e.preventDefault(); clearSelection(); }
+  else if(ctrl && (k==="d"||k==="D")){ e.preventDefault(); fillDir("down"); }
+  else if(ctrl && (k==="r"||k==="R")){ e.preventDefault(); fillDir("right"); }
+  else if(ctrl){ /* let native copy/paste/select-all pass through */ }
+  else if(k.length===1 && !e.altKey){ e.preventDefault(); editActive(k); }
+}
+if(!window._sheetDocBound){ window._sheetDocBound=true;
+  document.addEventListener("mouseup", ()=>{ if(sheet.fill){ sheet.fill=false; const to=sheet.fillTo; sheet.fillTo=null; doHandleFill(to); } sheet.drag=false; });
+  document.addEventListener("keydown", onSheetKey);
+  document.addEventListener("copy", e=>{ if(!sheetActive()||!sheet.anchor) return; const ae=document.activeElement; if(ae && (ae.tagName==="INPUT"||ae.tagName==="TEXTAREA")) return;
+    const tsv=selTSV(); if(tsv==null) return; e.preventDefault(); (e.clipboardData||window.clipboardData).setData("text/plain",tsv); });
+  document.addEventListener("paste", e=>{ if(!sheetActive()||!sheet.anchor) return; const ae=document.activeElement; if(ae && (ae.tagName==="INPUT"||ae.tagName==="TEXTAREA")) return;
+    const cd=e.clipboardData||window.clipboardData, txt=cd&&cd.getData("text"); if(!txt) return; e.preventDefault(); doPaste(txt); });
+}
+
+/* ================= live updates (Supabase Realtime) =================
+   Subscribes to row changes on every data table and merges them into local state,
+   so edits by other people appear without a reload. Re-render is debounced and
+   deferred while this user has a cell editor or modal open (so it never yanks their
+   input away). Realtime honors RLS, so users only receive rows they may read. */
+let _rt=null, _rtTimer=null;
+function isEditingOpen(){ return !!(document.querySelector(".cellinput") || document.querySelector(".modal-ov")); }
+function rtRender(){ clearTimeout(_rtTimer); _rtTimer=setTimeout(function tick(){ if(isEditingOpen()){ _rtTimer=setTimeout(tick,400); return; } render(); }, 150); }
+function setLive(status){
+  const el=$("liveDot"); if(!el) return;
+  if(DEMO){ el.classList.add("hidden"); return; }
+  const ok=status==="SUBSCRIBED";
+  el.classList.toggle("on",ok); el.classList.toggle("off",!ok);
+  el.textContent = ok ? "Live" : (status==="CLOSED" ? "Offline" : "Reconnecting…");
+  el.title = ok ? "Live updates connected — changes appear automatically" : "Reconnecting to live updates";
+}
+async function startRealtime(){
+  if(DEMO){ setLive(); return; }
+  if(!sb || _rt) return;
+  try{ const { data } = await sb.auth.getSession(); const tok=data&&data.session&&data.session.access_token;
+    if(tok && sb.realtime && sb.realtime.setAuth) sb.realtime.setAuth(tok); }catch(e){}
+  const tables=["flow_rows","pending_budget_cols","pending_budget_checks","pending_budget_status","takeoff_changes","tf_plan_names","tf_change_log"];
+  let ch=sb.channel("tf-live");
+  tables.forEach(t=>{ ch=ch.on("postgres_changes",{event:"*",schema:"public",table:t},p=>onRemote(t,p)); });
+  ch.subscribe(status=>setLive(status)); _rt=ch;
+}
+function onRemote(table, p){
+  const ev=p.eventType||p.event, row=(p.new && Object.keys(p.new).length)?p.new:null, old=p.old||{};
+  if(table==="flow_rows"){
+    if(ev==="DELETE") state.flow=state.flow.filter(x=>x.id!==old.id);
+    else if(row){ if(row.division!==state.divKey) state.flow=state.flow.filter(x=>x.id!==row.id);
+      else { const i=state.flow.findIndex(x=>x.id===row.id); if(i>=0) state.flow[i]=row; else { state.flow.push(row); state.flow.sort(bySort); } } }
+  } else if(table==="pending_budget_cols"){
+    if(ev==="DELETE") state.cols=state.cols.filter(x=>x.id!==old.id);
+    else if(row){ if(row.division!==state.divKey) state.cols=state.cols.filter(x=>x.id!==row.id);
+      else { const i=state.cols.findIndex(x=>x.id===row.id); if(i>=0) state.cols[i]=row; else { state.cols.push(row); state.cols.sort(bySort); } } }
+  } else if(table==="pending_budget_checks"){
+    if(ev==="DELETE") delete state.checks[old.flow_id+"::"+old.col_id];
+    else if(row) state.checks[row.flow_id+"::"+row.col_id]=!!row.checked;
+  } else if(table==="pending_budget_status"){
+    if(ev==="DELETE") delete state.status[old.flow_id];
+    else if(row) state.status[row.flow_id]={sim_reviewed:!!row.sim_reviewed, sent_to_loc:!!row.sent_to_loc};
+  } else if(table==="takeoff_changes"){
+    if(ev==="DELETE") state.changes=state.changes.filter(x=>x.id!==old.id);
+    else if(row){ if(row.division!==state.divKey) state.changes=state.changes.filter(x=>x.id!==row.id);
+      else { const i=state.changes.findIndex(x=>x.id===row.id); if(i>=0) state.changes[i]=row; else { state.changes.unshift(row); state.changes.sort((a,b)=>(b.req_date||"").localeCompare(a.req_date||"")); } } }
+  } else if(table==="tf_plan_names"){ loadPlanNames().then(rtRender); return; }
+  else if(table==="tf_change_log"){ refreshWhatsNewBadge(); return; }
+  rtRender();
 }
 /* convert displayed M/D/YY back to ISO for the date input */
 function invFmt(disp){ if(!disp||disp==="—") return ""; const p=disp.split("/"); if(p.length!==3) return ""; let[m,d,y]=p.map(Number); y=y<100?2000+y:y; return `${y}-${String(m).padStart(2,"0")}-${String(d).padStart(2,"0")}`; }
@@ -904,7 +1113,9 @@ function exportCSV(){
     rows=chgRows().map(r=>CHG_COLS.map(c=>c.type==="check"?(r[c.f]?"Y":""):(c.type==="date"?fmtDate(r[c.f]):r[c.f]))); }
   else { cols=["Community","Comm #","Plan","Ele","Trench"]; name="todo_outstanding";
     rows=todoOutstanding().map(r=>[r.community_name,r.community_num,r.plan,r.elevation,fmtDate(r.first_trench_date)]); }
-  const csv=[cols,...rows].map(r=>r.map(v=>{ v=v==null?"":String(v); return /[",\n]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v; }).join(",")).join("\n");
+  const csv=[cols,...rows].map(r=>r.map(v=>{ v=v==null?"":String(v);
+    if(/^[=+\-@\t\r]/.test(v)) v="'"+v;                              // neutralize spreadsheet formula injection
+    return /[",\n]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v; }).join(",")).join("\n");
   const a=document.createElement("a"); a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv"}));
   a.download=`${name}_${state.divKey}_${todayIso()}.csv`; a.click(); URL.revokeObjectURL(a.href);
 }
