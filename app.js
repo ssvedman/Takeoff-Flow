@@ -1302,21 +1302,40 @@ async function existingFlow(div){
   if(DEMO) return MEM.flow_rows.filter(r=>r.division===div);
   return await sbAll(()=>sb.from("flow_rows").select("id,community_name,community_num,plan,elevation,first_trench_date,sort_order").eq("division",div));
 }
-async function publishImport(div, fresh, moved, summary, detail){
-  $("publishImport").disabled=true;
-  const existRows=await existingFlow(div);
-  let n=existRows.reduce((m,r)=>Math.max(m, r.sort_order||0), 0);
-  for(const p of fresh){ const row={ id:uid(), division:div, sort_order:++n };
-    for(const k in p){ if(k!=="id"&&k!=="division"&&k!=="sort_order") row[k]=p[k]; }
-    await saveRow("flow_rows",row); if(div===state.divKey) state.flow.push(row); }
-  for(const m of (moved||[])){                                   // adjust First Trench where the earliest start moved
-    await savePatch("flow_rows", m.id, { first_trench_date:m.to });
-    if(div===state.divKey){ const r=state.flow.find(x=>x.id===m.id); if(r) r.first_trench_date=m.to; }
+/* One request per 500 rows instead of one per row. `op` is "insert" or "upsert". */
+async function sbBulk(op, table, rows, extra){
+  const CHUNK=500;
+  for(let i=0;i<rows.length;i+=CHUNK){
+    const slice=rows.slice(i,i+CHUNK);
+    const { error } = op==="upsert" ? await sb.from(table).upsert(slice, extra) : await sb.from(table).insert(slice);
+    if(error){ console.error(error); throw error; }
   }
-  await logChange(div, summary||`Imported ${fresh.length} row(s) into ${div}`, detail);
-  adminMsg(`Published ${fresh.length} new row(s)${(moved&&moved.length)?` and updated ${moved.length} trench date(s)`:""} in ${div}.`,"ok");
-  $("previewPanel").classList.add("hidden"); $("tileStarts").classList.remove("filled"); $("startsName").textContent="Drop the Starts Log .xlsx here or click to browse";
-  if(div===state.divKey) { /* refresh underlying data */ await loadDivision(div); render(); }
+}
+async function publishImport(div, fresh, moved, summary, detail){
+  $("publishImport").disabled=true; adminMsg("Publishing…","info");
+  try{
+    const existRows=await existingFlow(div);
+    let n=existRows.reduce((m,r)=>Math.max(m, r.sort_order||0), 0);
+    const now=new Date().toISOString();
+    // build all new rows up front
+    const newRows=fresh.map(p=>{ const row={ id:uid(), division:div, sort_order:++n, updated_at:now, updated_by:state.email };
+      for(const k in p){ if(k!=="id"&&k!=="division"&&k!=="sort_order") row[k]=p[k]; } return row; });
+    // partial upsert for moved dates: id + division (NOT NULL) + the changed field only
+    const dateRows=(moved||[]).map(m=>({ id:m.id, division:div, first_trench_date:m.to, updated_at:now, updated_by:state.email }));
+    if(DEMO){
+      newRows.forEach(r=>MEM.flow_rows.push(r));
+      dateRows.forEach(d=>{ const r=MEM.flow_rows.find(x=>x.id===d.id); if(r) r.first_trench_date=d.first_trench_date; });
+    }else{
+      if(newRows.length) await sbBulk("insert","flow_rows",newRows);            // one call per 500 new rows
+      if(dateRows.length) await sbBulk("upsert","flow_rows",dateRows,{onConflict:"id"});  // one call per 500 date updates
+    }
+    await logChange(div, summary||`Imported ${fresh.length} row(s) into ${div}`, detail);
+    adminMsg(`Published ${fresh.length} new row(s)${(moved&&moved.length)?` and updated ${moved.length} trench date(s)`:""} in ${div}.`,"ok");
+    $("previewPanel").classList.add("hidden"); $("tileStarts").classList.remove("filled"); $("startsName").textContent="Drop the Starts Log .xlsx here or click to browse";
+    if(div===state.divKey){ await loadDivision(div); render(); }   // reload once, not per row
+  }catch(e){
+    adminMsg("Publish failed: "+(e.message||e),"err"); $("publishImport").disabled=false;
+  }
 }
 /* ---- change history ("What's New") ---- */
 async function logChange(division, summary, detail){
