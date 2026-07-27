@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Lennar Takeoff Flow</title>
 <link rel="icon" href="logo.svg">
-<link rel="stylesheet" href="styles.css?v=45">
+<link rel="stylesheet" href="styles.css?v=46">
 </head>
 <body>
 
@@ -80,9 +80,10 @@
             <div style="padding:16px">
               <p class="tiny" style="text-align:left;margin:0 0 12px">
                 Pick a division and upload its <b>Starts Log</b> (.xlsx). New Community / Plan / Elevation rows are
-                proposed with a suggested trench date. The correct tab is read per division (Orlando →
-                <i>Permit Log</i>, Tampa → <i>Start Log</i>). You review before publishing, and existing rows are
-                never overwritten.</p>
+                proposed with their earliest trench date, and existing combinations whose earliest start has
+                <b>moved</b> are flagged so their First Trench date can be updated. The correct tab is read per
+                division (Orlando → <i>Permit Log</i>, Tampa → <i>Start Log</i>). You review everything before
+                publishing; nothing else on existing rows is overwritten.</p>
               <label class="fld" for="adminDiv">Division</label>
               <select id="adminDiv"></select>
               <div class="uptiles" style="grid-template-columns:1fr">
@@ -117,7 +118,7 @@
 <!-- All data (flow rows, budgets, checkboxes, changes, plan-name lookup) is served.
      from Supabase — nothing operational is bundled in this repo. The data/*.js and
      seed_*.sql files are git-ignored (used locally to generate the one-time seed SQL). -->
-<script src="config.js?v=45"></script>
-<script src="app.js?v=45"></script>
+<script src="config.js?v=46"></script>
+<script src="app.js?v=46"></script>
 </body>
 </html>
