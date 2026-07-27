@@ -1254,10 +1254,16 @@ async function buildImportPreview(){
     const k=String(r.community_num||"").trim()+"|"+normPlan(r.plan); if(!existByNumPlan.has(k)) existByNumPlan.set(k,r); });
   const findExisting=p=>{ const num=String(p.community_num||"").trim();
     return existByCombo.get(combo(num,p.plan,p.elevation)) || (!String(p.elevation||"").trim()?existByNumPlan.get(num+"|"+normPlan(p.plan)):null) || null; };
-  const freshSet=new Set(fresh), moved=[];
+  // Several parsed combos can map to ONE existing row (plex plans collapse to "plex",
+  // or an elevation-less start falls back to community+plan). Collapse them per row and
+  // keep the EARLIEST date, so each row is updated once (also avoids a duplicate-id upsert).
+  const freshSet=new Set(fresh), earliestByRow=new Map();
   if(!isFlow) proposed.forEach(p=>{ if(freshSet.has(p)) return; const r=findExisting(p); if(!r) return;
-    const nt=p.first_trench_date; if(nt && nt!==(r.first_trench_date||null))
-      moved.push({ id:r.id, community_name:numName[String(r.community_num||"").trim()]||r.community_name, community_num:r.community_num, plan:r.plan, elevation:r.elevation||"", from:r.first_trench_date||"", to:nt }); });
+    const nt=p.first_trench_date; if(!nt) return;
+    const cur=earliestByRow.get(r.id); if(!cur){ earliestByRow.set(r.id,{row:r, earliest:nt}); } else if(nt<cur.earliest){ cur.earliest=nt; } });
+  const moved=[];
+  earliestByRow.forEach(({row:r, earliest})=>{ if(earliest!==(r.first_trench_date||null))
+    moved.push({ id:r.id, community_name:numName[String(r.community_num||"").trim()]||r.community_name, community_num:r.community_num, plan:r.plan, elevation:r.elevation||"", from:r.first_trench_date||"", to:earliest }); });
   const panel=$("previewPanel"), body=$("previewBody");
   panel.classList.remove("hidden");
   const src=isFlow?"FLOW OF TAKEOFFS workbook":"Starts Log";
@@ -1320,8 +1326,11 @@ async function publishImport(div, fresh, moved, summary, detail){
     // build all new rows up front
     const newRows=fresh.map(p=>{ const row={ id:uid(), division:div, sort_order:++n, updated_at:now, updated_by:state.email };
       for(const k in p){ if(k!=="id"&&k!=="division"&&k!=="sort_order") row[k]=p[k]; } return row; });
-    // partial upsert for moved dates: id + division (NOT NULL) + the changed field only
-    const dateRows=(moved||[]).map(m=>({ id:m.id, division:div, first_trench_date:m.to, updated_at:now, updated_by:state.email }));
+    // partial upsert for moved dates: id + division (NOT NULL) + the changed field only.
+    // Dedup by id (keep earliest) so the batch never touches the same row twice.
+    const byId=new Map();
+    (moved||[]).forEach(m=>{ const cur=byId.get(m.id); if(!cur || (m.to && m.to<cur.to)) byId.set(m.id, m); });
+    const dateRows=[...byId.values()].map(m=>({ id:m.id, division:div, first_trench_date:m.to, updated_at:now, updated_by:state.email }));
     if(DEMO){
       newRows.forEach(r=>MEM.flow_rows.push(r));
       dateRows.forEach(d=>{ const r=MEM.flow_rows.find(x=>x.id===d.id); if(r) r.first_trench_date=d.first_trench_date; });
