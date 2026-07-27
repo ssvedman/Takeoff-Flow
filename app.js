@@ -684,6 +684,7 @@ function renderTodo(tb,area){
     {f:"community_name",h:"Community",disp:r=>r.community_name||"",raw:r=>r.community_name||""},
     {f:"community_num", h:"Comm #",   disp:r=>r.community_num||"", raw:r=>r.community_num||""},
     {f:"plan",          h:"Plan",     disp:r=>r.plan||"",          raw:r=>r.plan||""},
+    {f:"plan_name",     h:"Plan Name",disp:r=>planName(r),          raw:r=>planName(r)},
     {f:"elevation",     h:"Ele",      disp:r=>r.elevation||"",     raw:r=>r.elevation||""},
     {f:"first_trench_date",h:"Trench",disp:r=>fmtDate(r.first_trench_date),raw:r=>r.first_trench_date||""}
   ];
@@ -694,7 +695,7 @@ function renderTodo(tb,area){
     + `<span class="grow"></span>`
     + `<span class="section-note" style="margin:0">Plan/elevations from Flow of Takeoffs that are <b>not yet completed</b> (no Released date). Fill in Released on the Flow tab and the item clears itself.</span>`;
   let h=`<div class="grid-wrap"><table class="grid"><thead>${theadHTML(cols,false)}</thead><tbody>`;
-  if(!rows.length) h+=`<tr><td colspan="5"><div class="empty">Nothing outstanding — every plan/elevation has a Released date.</div></td></tr>`;
+  if(!rows.length) h+=`<tr><td colspan="6"><div class="empty">Nothing outstanding — every plan/elevation has a Released date.</div></td></tr>`;
   rows.forEach(r=>{ h+=`<tr>`+cols.map(c=>`<td><span class="cell"><span class="val">${esc(c.disp(r))}</span></span></td>`).join("")+`</tr>`; });
   h+=`</tbody></table></div>`;
   area.innerHTML=h;
@@ -1114,8 +1115,8 @@ function exportCSV(){
       ...state.cols.map(c=>state.checks[r.id+"::"+c.id]?"Y":""), st.sim_reviewed?"Y":"", st.sent_to_loc?"Y":"", fmtDate(workday(r.first_trench_date,-30,true)), fmtDate(effective(r,"loc_upload")), fmtDate(effective(r,"tasks_start")), fmtDate(r.first_trench_date)]; }); }
   else if(state.view==="changes"){ cols=CHG_COLS.map(c=>c.h); name="takeoff_changes";
     rows=chgRows().map(r=>CHG_COLS.map(c=>c.type==="check"?(r[c.f]?"Y":""):(c.type==="date"?fmtDate(r[c.f]):r[c.f]))); }
-  else { cols=["Community","Comm #","Plan","Ele","Trench"]; name="todo_outstanding";
-    rows=todoOutstanding().map(r=>[r.community_name,r.community_num,r.plan,r.elevation,fmtDate(r.first_trench_date)]); }
+  else { cols=["Community","Comm #","Plan","Plan Name","Ele","Trench"]; name="todo_outstanding";
+    rows=todoOutstanding().map(r=>[r.community_name,r.community_num,r.plan,planName(r),r.elevation,fmtDate(r.first_trench_date)]); }
   const csv=[cols,...rows].map(r=>r.map(v=>{ v=v==null?"":String(v);
     if(/^[=+\-@\t\r]/.test(v)) v="'"+v;                              // neutralize spreadsheet formula injection
     return /[",\n]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v; }).join(",")).join("\n");
