@@ -1452,7 +1452,8 @@ function drawUsers(){
   const q=lc(($("userSearch")&&$("userSearch").value)||"");
   const rows=q ? state.users.filter(u=>lc(u.email).includes(q)||lc(u.role).includes(q)||(u.divisions||[]).some(d=>lc(d).includes(q))) : state.users;
   if(!rows.length){ list.innerHTML=`<p class="tiny" style="text-align:left;margin:0">No users match “${esc(q)}”.</p>`; return; }
-  list.innerHTML=rows.map(u=>`<div class="userrow"><span class="em">${esc(u.email)}</span><span class="role-tag">${esc(u.role)}</span>${(u.divisions||[]).map(d=>`<span class="badge" style="background:var(--navy)">${esc(d)}</span>`).join(" ")}<button class="btn mini danger" data-deluser="${esc(u.email)}">Remove</button></div>`).join("");
+  list.innerHTML=rows.map(u=>`<div class="userrow"><span class="em">${esc(u.email)}</span><span class="role-tag">${esc(u.role)}</span>${(u.divisions||[]).map(d=>`<span class="badge" style="background:var(--navy)">${esc(d)}</span>`).join(" ")}<button class="btn mini ghost" data-invite="${esc(u.email)}">Invite</button><button class="btn mini danger" data-deluser="${esc(u.email)}">Remove</button></div>`).join("");
+  list.querySelectorAll("[data-invite]").forEach(b=>b.onclick=()=>inviteUser(b.dataset.invite));
   list.querySelectorAll("[data-deluser]").forEach(b=>b.onclick=async()=>{ const em=b.dataset.deluser; if(!confirm("Remove role for "+em+"?"))return;
     if(DEMO){ MEM.app_roles=MEM.app_roles.filter(u=>u.email!==em); } else { await sb.from("tf_app_roles").delete().eq("email",em); }
     state.users=state.users.filter(u=>u.email!==em); drawUsers(); });
@@ -1508,6 +1509,39 @@ async function genResetLink(){
     resetMsg((data.created?"New account created for ":"Reset link ready for ")+email+" — copy the link and send it. It expires in 24 hours.","ok");
   }catch(e){ resetMsg(prettyErr(e,"Could not generate a link."),"err"); }
   finally{ $("resetGen").disabled=false; $("resetGen").textContent="Generate link"; }
+}
+/* Per-user "Invite": generate a one-time link for that email and show it to copy/send.
+   (No email is sent — Lennar's gateway blocks the sender, so the admin sends it directly.) */
+async function inviteUser(email){
+  email=lc(email);
+  if(DEMO) return showInviteModal(email, null, "Invites are disabled in demo mode.");
+  try{
+    const { data, error }=await sb.rpc("tf_admin_add_or_reset",{ target_email:email });
+    if(error) throw error;
+    const token=data&&data.token; if(!token) throw new Error("No link was returned.");
+    const url=location.origin+location.pathname+"#recover="+encodeURIComponent(token);
+    showInviteModal(email, url, (data.created?"New account created. ":"")+"Copy this one-time link (valid 24 hours) and send it to the user — it lets them set their own password. No email is sent.");
+  }catch(e){ showInviteModal(email, null, "Couldn't create a link: "+prettyErr(e,"unknown error")); }
+}
+function showInviteModal(email, url, note){
+  document.querySelectorAll(".modal-ov").forEach(m=>m.remove());
+  const ov=document.createElement("div"); ov.className="modal-ov";
+  ov.innerHTML=`<div class="modal-card" style="max-width:560px">
+    <div class="modal-h">Invite ${esc(email)}<button class="linkbtn" data-x aria-label="Close">&times;</button></div>
+    <div class="modal-body">
+      <p class="tiny" style="text-align:left;margin:0 0 12px">${esc(note||"")}</p>
+      ${url?`<div class="linkrow"><input type="text" id="inviteLink" readonly value="${esc(url)}"><button class="btn mini ghost" id="inviteCopy">Copy</button></div>`:""}
+      <div class="modal-actions" style="margin-top:14px"><button class="btn ghost" id="inviteClose">Close</button></div>
+    </div></div>`;
+  document.body.appendChild(ov);
+  const close=()=>ov.remove();
+  ov.addEventListener("click",e=>{ if(e.target===ov) close(); });
+  ov.querySelector("[data-x]").onclick=close;
+  ov.querySelector("#inviteClose").onclick=close;
+  if(url){ const i=ov.querySelector("#inviteLink"); i.focus(); i.select();
+    ov.querySelector("#inviteCopy").onclick=()=>{ i.select(); i.setSelectionRange(0,99999);
+      if(navigator.clipboard) navigator.clipboard.writeText(i.value); else document.execCommand("copy");
+      const b=ov.querySelector("#inviteCopy"); b.textContent="Copied"; setTimeout(()=>b.textContent="Copy",1500); }; }
 }
 
 /* ---------------- DEMO seed ----------------
