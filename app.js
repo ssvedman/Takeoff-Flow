@@ -130,59 +130,33 @@ function prettyErr(e, fallback){
 }
 if(DEMO){ $("demoPill").classList.remove("hidden"); }
 
-$("sendBtn").addEventListener("click", sendCode);
-$("email").addEventListener("keydown", e=>{ if(e.key==="Enter") sendCode(); });
-$("verifyBtn").addEventListener("click", verifyCode);
-$("code").addEventListener("keydown", e=>{ if(e.key==="Enter") verifyCode(); });
-$("backBtn").addEventListener("click", ()=>{ $("stepCode").classList.add("hidden"); $("stepEmail").classList.remove("hidden"); clearAuth(); });
+$("signinBtn").addEventListener("click", signIn);
+$("email").addEventListener("keydown", e=>{ if(e.key==="Enter") $("password").focus(); });
+$("password").addEventListener("keydown", e=>{ if(e.key==="Enter") signIn(); });
 
-function otpHistory(){ try{ return JSON.parse(localStorage.getItem("tf_otp_sends")||"[]"); }catch(e){ return []; } }
-function otpRecord(){ const h=otpHistory(); h.push(Date.now()); try{ localStorage.setItem("tf_otp_sends",JSON.stringify(h.slice(-50))); }catch(e){} }
-function otpThrottle(){
-  if(DEMO) return null;   // no cooldown in demo/test mode; limits still apply once Supabase is connected
-  const L=CFG.OTP_LIMITS||{}, now=Date.now(), h=otpHistory();
-  if(L.cooldownSec && h.length && now-h[h.length-1] < L.cooldownSec*1000) return `Please wait ${Math.ceil((L.cooldownSec*1000-(now-h[h.length-1]))/1000)}s before requesting another code.`;
-  if(L.perHour && h.filter(t=>now-t<3600e3).length>=L.perHour) return "Too many code requests this hour. Try again later.";
-  if(L.perDay  && h.filter(t=>now-t<864e5).length>=L.perDay)   return "Daily code-request limit reached.";
-  return null;
-}
-
-async function sendCode(){
-  const email = lc($("email").value);
-  if(!email || !email.endsWith(CFG.ALLOWED_DOMAIN)) return authMsg("Use your "+CFG.ALLOWED_DOMAIN+" email address.","err");
-  const t=otpThrottle(); if(t) return authMsg(t,"err");
-  $("sendBtn").disabled=true;
+async function signIn(){
+  const email=lc($("email").value);
+  const password=$("password").value;
+  clearAuth();
+  if(!email || !email.includes("@")) return authMsg("Please enter your email address.","err");
+  if(!email.endsWith(CFG.ALLOWED_DOMAIN)) return authMsg("Access is limited to "+CFG.ALLOWED_DOMAIN+" email addresses.","err");
+  if(!password) return authMsg("Please enter your password.","err");
+  $("signinBtn").disabled=true; $("signinBtn").textContent="Signing in…";
   try{
-    if(DEMO){ authMsg("DEMO mode — enter code "+CFG.DEMO_CODE+".","info"); }
-    else{
-      const { error } = await sb.auth.signInWithOtp({ email, options:{ shouldCreateUser:true } });
-      if(error) throw error;
-      authMsg("Code sent. Check your inbox.","ok");
-    }
-    otpRecord();
-    state.email=email; $("sentTo").textContent=email;
-    $("stepEmail").classList.add("hidden"); $("stepCode").classList.remove("hidden"); $("code").focus();
-  }catch(e){ authMsg(prettyErr(e,"Couldn't send the code."),"err"); }
-  finally{ $("sendBtn").disabled=false; }
+    if(DEMO){ await new Promise(r=>setTimeout(r,300)); await onSignedIn(email); return; }
+    const { error }=await sb.auth.signInWithPassword({ email, password }); if(error) throw error;
+    await onSignedIn(email);
+  }catch(e){ const m=(e&&e.message)||"";
+    const friendly = /invalid login credentials/i.test(m) ? "Incorrect email or password."
+      : /email not confirmed/i.test(m) ? "Your account isn't activated yet — contact the portal admin."
+      : prettyErr(e,"Sign-in failed.");
+    authMsg(friendly,"err");
+  }finally{ $("signinBtn").disabled=false; $("signinBtn").textContent="Sign in"; }
 }
 
-async function verifyCode(){
-  const code=$("code").value.trim();
-  if(!code) return authMsg("Enter the code from your email.","err");
-  $("verifyBtn").disabled=true;
-  try{
-    if(DEMO){
-      if(code!==CFG.DEMO_CODE) throw new Error("Incorrect demo code.");
-    }else{
-      const { error } = await sb.auth.verifyOtp({ email:state.email, token:code, type:"email" });
-      if(error) throw error;
-    }
-    await onSignedIn(state.email);
-  }catch(e){ authMsg(prettyErr(e,"Couldn't verify the code."),"err"); }
-  finally{ $("verifyBtn").disabled=false; }
-}
-
+let _entered=false;
 async function onSignedIn(email){
+  if(_entered) return; _entered=true;                 // guard against double-boot (signIn + onAuthStateChange)
   state.email=lc(email);
   // resolve role: Supabase tf_app_roles is authoritative; config is the fallback/seed
   let resolved=resolveRoleFromConfig(state.email);
@@ -200,6 +174,7 @@ async function onSignedIn(email){
 async function tryRestore(){
   if(DEMO || !sb) return;
   try{ const { data } = await sb.auth.getSession(); if(data && data.session && data.session.user) await onSignedIn(data.session.user.email); }catch(e){}
+  try{ sb.auth.onAuthStateChange((_e, session)=>{ if(session && session.user) onSignedIn(session.user.email); }); }catch(e){}
 }
 
 /* --------------- data layer --------------- */

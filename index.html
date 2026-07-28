@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Lennar Takeoff Flow</title>
 <link rel="icon" href="logo.svg">
-<link rel="stylesheet" href="styles.css?v=49">
+<link rel="stylesheet" href="styles.css?v=50">
 </head>
 <body>
 
@@ -14,20 +14,16 @@
   <div class="auth-card">
     <div class="brand"><img class="auth-logo" src="logo.svg" alt="Takeoff Flow">
       <h1>Takeoff Flow <span id="demoPill" class="demo-pill hidden">DEMO</span></h1></div>
-    <p class="auth-sub">Sign in with your Lennar email to view the takeoff schedule.</p>
-    <div id="stepEmail">
+    <p class="auth-sub">Sign in with your Lennar email and password to view the takeoff schedule.</p>
+    <div id="stepSignin">
       <label class="fld" for="email">Work email</label>
       <input type="email" id="email" placeholder="you@lennar.com" autocomplete="email">
-      <button class="btn" id="sendBtn">Send verification code</button>
-    </div>
-    <div id="stepCode" class="hidden">
-      <label class="fld" for="code">Enter the code sent to <span id="sentTo"></span></label>
-      <input type="text" id="code" class="code-input" inputmode="numeric" maxlength="10" placeholder="Enter code">
-      <button class="btn" id="verifyBtn">Verify &amp; sign in</button>
-      <button class="btn ghost" id="backBtn" style="margin-top:10px">Use a different email</button>
+      <label class="fld" for="password" style="margin-top:12px">Password</label>
+      <input type="password" id="password" placeholder="Your password" autocomplete="current-password">
+      <button class="btn" id="signinBtn" style="margin-top:14px">Sign in</button>
     </div>
     <div id="authMsg" class="msg"></div>
-    <p class="tiny">Access limited to Lennar associates.</p>
+    <p class="tiny">Access limited to Lennar associates. Need access or a password reset? Contact the portal admin.</p>
   </div>
 </div>
 
@@ -118,7 +114,7 @@
 <!-- All data (flow rows, budgets, checkboxes, changes, plan-name lookup) is served.
      from Supabase — nothing operational is bundled in this repo. The data/*.js and
      seed_*.sql files are git-ignored (used locally to generate the one-time seed SQL). -->
-<script src="config.js?v=49"></script>
-<script src="app.js?v=49"></script>
+<script src="config.js?v=50"></script>
+<script src="app.js?v=50"></script>
 </body>
 </html>
