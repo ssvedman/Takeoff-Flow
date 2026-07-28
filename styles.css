@@ -333,6 +333,9 @@ table.grid tbody td.handle-td{ overflow:visible!important; position:relative; }
 
 /* ---------- Access & permissions table ---------- */
 .permsearch{width:100%;font-size:13px;margin:0 0 10px}
+.pn-toolbar{display:flex;align-items:center;gap:8px;margin:0 0 10px}
+.pn-toolbar .permsearch{flex:1;margin:0}
+.btn.mini.pn-add{flex:0 0 auto;width:34px;padding:0;font-size:20px;line-height:1;font-weight:400}
 .table-wrap{overflow:auto;max-height:60vh;border:1px solid var(--line);border-radius:var(--radius)}
 .table-wrap table{border-collapse:separate;border-spacing:0;width:100%;font-size:13.5px}
 .table-wrap thead th{position:sticky;top:0;background:var(--navy);color:#fff;font-weight:600;text-align:left;padding:9px 12px;white-space:nowrap;z-index:2}

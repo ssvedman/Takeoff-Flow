@@ -1567,20 +1567,16 @@ function renderPlanNames(){
   const label=(CFG.DIVISIONS.find(d=>d.key===div)||{}).label||div;
   p.innerHTML=`<div class="panel"><div class="panel-h">Plan names — ${esc(label)}</div>
     <div style="padding:16px">
-      <p class="tiny" style="text-align:left;margin:0 0 12px">Map a plan number to a plan name. Names show (read-only) on the Flow, Pending Budgets, and To-Do tabs for this division.</p>
-      <div class="permform">
-        <input type="text" id="pnNo" placeholder="Plan # (e.g. 1447)" style="max-width:150px">
-        <input type="text" id="pnName" placeholder="Plan name">
-        <button class="btn mini" id="pnAdd">Save</button>
+      <p class="tiny" style="text-align:left;margin:0 0 12px">Plan names are consistent across divisions; only the <b>plan number</b> is division-specific. This list shows the numbers mapped for <b>${esc(label)}</b>. Names show read-only on the Flow, Pending Budgets, and To-Do tabs.</p>
+      <div class="pn-toolbar">
+        <input type="text" id="pnSearch" class="permsearch" placeholder="Search plan # or name…">
+        <button class="btn mini pn-add" id="pnAddBtn" title="Add plan name" aria-label="Add plan name">+</button>
       </div>
       <div id="pnMsg" class="msg"></div>
-      <input type="text" id="pnSearch" class="permsearch" placeholder="Search plan # or name…">
       <div class="table-wrap" id="pnList"></div>
     </div></div>`;
-  $("pnAdd").onclick=()=>savePlanNameRow(div);
+  $("pnAddBtn").onclick=()=>openPlanNameModal(div, null);
   $("pnSearch").oninput=()=>drawPlanNames(div);
-  $("pnNo").addEventListener("keydown",e=>{ if(e.key==="Enter") $("pnName").focus(); });
-  $("pnName").addEventListener("keydown",e=>{ if(e.key==="Enter") savePlanNameRow(div); });
   drawPlanNames(div);
 }
 function pnMsg(t,k){ const m=$("pnMsg"); if(m){ m.className="msg "+(k||"info"); m.textContent=t; } }
@@ -1596,19 +1592,56 @@ function drawPlanNames(div){
     rows.map(r=>`<tr><td>${esc(r.plan_no)}</td><td>${esc(r.name)}</td>
       <td class="acts"><button class="linkbtn pnEdit" data-no="${esc(r.plan_no)}">Edit</button> <button class="linkbtn pnDel" data-no="${esc(r.plan_no)}">Remove</button></td></tr>`).join("")
   }</tbody></table>`;
-  list.querySelectorAll(".pnEdit").forEach(b=>b.onclick=()=>{ const no=b.dataset.no; $("pnNo").value=no; $("pnName").value=map[no]||""; $("pnName").focus(); });
+  list.querySelectorAll(".pnEdit").forEach(b=>b.onclick=()=>openPlanNameModal(div, {division:div, plan_no:b.dataset.no, name:map[b.dataset.no]||""}));
   list.querySelectorAll(".pnDel").forEach(b=>b.onclick=()=>delPlanNameRow(div,b.dataset.no));
 }
-async function savePlanNameRow(div){
-  const no=String($("pnNo").value||"").trim().toUpperCase();
-  const name=String($("pnName").value||"").trim();
-  if(!no) return pnMsg("Enter a plan number.","err");
-  if(!name) return pnMsg("Enter a plan name.","err");
-  state.planNames=state.planNames||{}; const m=state.planNames[div]=state.planNames[div]||{};
-  m[no]=name;
-  if(!DEMO){ const { error }=await sb.from("tf_plan_names").upsert({division:div, plan_no:no, name},{onConflict:"division,plan_no"}); if(error){ delete m[no]; return pnMsg("Save failed: "+error.message,"err"); } }
-  $("pnNo").value=""; $("pnName").value=""; pnMsg("Saved "+no+" → "+name+".","ok");
-  drawPlanNames(div);
+/* Add / edit a plan-name mapping. Lets the user pick which division the plan NUMBER
+   belongs to (numbers are division-specific); the plan NAME is shared across divisions. */
+function openPlanNameModal(tileDiv, orig){
+  document.querySelectorAll(".modal-ov").forEach(m=>m.remove());
+  const divs=CFG.DIVISIONS.filter(d=>isAdmin()||canEditDiv(d.key));
+  const selDiv=(orig&&orig.division)||tileDiv;
+  const opts=divs.map(d=>`<option value="${d.key}" ${d.key===selDiv?"selected":""}>${esc(d.label)}</option>`).join("");
+  const ov=document.createElement("div"); ov.className="modal-ov";
+  ov.innerHTML=`<div class="modal-card" style="max-width:460px">
+    <div class="modal-h">${orig?"Edit plan name":"Add plan name"}<button class="linkbtn" data-x aria-label="Close">&times;</button></div>
+    <div class="modal-body">
+      <label class="fld" for="pnmName">Plan name</label>
+      <input type="text" id="pnmName" placeholder="e.g. Wellness Villa" value="${esc(orig?orig.name:"")}">
+      <label class="fld" for="pnmNo" style="margin-top:12px">Plan number</label>
+      <input type="text" id="pnmNo" placeholder="e.g. 1447" value="${esc(orig?orig.plan_no:"")}">
+      <label class="fld" for="pnmDiv" style="margin-top:12px">Division</label>
+      <select id="pnmDiv">${opts}</select>
+      <p class="tiny" style="text-align:left;margin:12px 0 0">Plan names are considered consistent between divisions — the same plan name applies everywhere. Only the <b>plan number</b> is division-specific, so map each division's number to the shared name.</p>
+      <div id="pnmMsg" class="msg"></div>
+      <div class="modal-actions" style="margin-top:14px"><button class="btn" id="pnmSave">Save</button><button class="btn ghost" id="pnmCancel">Cancel</button></div>
+    </div></div>`;
+  document.body.appendChild(ov);
+  const close=()=>ov.remove();
+  ov.addEventListener("click",e=>{ if(e.target===ov) close(); });
+  ov.querySelector("[data-x]").onclick=close; ov.querySelector("#pnmCancel").onclick=close;
+  ov.querySelector("#pnmName").focus();
+  const msg=(t,k)=>{ const m=ov.querySelector("#pnmMsg"); m.className="msg "+(k||"info"); m.textContent=t; };
+  ov.querySelector("#pnmSave").onclick=async()=>{
+    const name=String(ov.querySelector("#pnmName").value||"").trim();
+    const no=String(ov.querySelector("#pnmNo").value||"").trim().toUpperCase();
+    const division=ov.querySelector("#pnmDiv").value;
+    if(!name) return msg("Enter a plan name.","err");
+    if(!no) return msg("Enter a plan number.","err");
+    const btn=ov.querySelector("#pnmSave"); btn.disabled=true;
+    try{
+      // editing and the key (division or number) changed → remove the old mapping first
+      if(orig && (orig.division!==division || orig.plan_no!==no)){
+        const om=(state.planNames&&state.planNames[orig.division])||{}; delete om[orig.plan_no];
+        if(!DEMO) await sb.from("tf_plan_names").delete().eq("division",orig.division).eq("plan_no",orig.plan_no);
+      }
+      state.planNames=state.planNames||{}; const m2=state.planNames[division]=state.planNames[division]||{}; m2[no]=name;
+      if(!DEMO){ const { error }=await sb.from("tf_plan_names").upsert({division, plan_no:no, name},{onConflict:"division,plan_no"}); if(error) throw error; }
+      close();
+      const cur=$("adminDiv")?$("adminDiv").value:division; drawPlanNames(cur);
+      pnMsg("Saved "+no+" → "+name+" ("+((CFG.DIVISIONS.find(d=>d.key===division)||{}).label||division)+").","ok");
+    }catch(e){ msg("Save failed: "+((e&&e.message)||e),"err"); btn.disabled=false; }
+  };
 }
 async function delPlanNameRow(div, no){
   if(!confirm("Remove the plan name for "+no+"?")) return;
