@@ -1430,9 +1430,15 @@ function safeJSON(s){ try{ return JSON.parse(s); }catch(e){ return null; } }
 async function renderPerms(){
   const p=$("permsPanel");
   if(!isAdmin()){ p.innerHTML=`<div class="panel"><div class="panel-h">Access</div><div style="padding:16px"><p class="tiny" style="text-align:left;margin:0">You can import and edit data for your division(s). Only an admin can change user roles.</p></div></div>`; return; }
-  // load users
+  // load users — all login accounts (shared across apps) with their Takeoff-Flow role
   if(DEMO){ state.users=MEM.app_roles.slice(); }
-  else{ try{ const { data }=await sb.from("tf_app_roles").select("*").order("email"); state.users=data||[]; }catch(e){ state.users=[]; } }
+  else{
+    try{ const { data, error }=await sb.rpc("tf_admin_list_users"); if(error) throw error;
+      state.users=(data||[]).map(u=>({email:u.email,role:u.role,divisions:u.divisions||[]}));
+    }catch(e){
+      try{ const { data }=await sb.from("tf_app_roles").select("*").order("email"); state.users=data||[]; }catch(e2){ state.users=[]; }
+    }
+  }
   const divChecks=CFG.DIVISIONS.map(d=>`<label class="permchk"><input type="checkbox" class="pdiv" value="${d.key}"> ${esc(d.label)}</label>`).join("");
   p.innerHTML=`<div class="panel"><div class="panel-h">Access &amp; permissions</div>
     <div style="padding:16px">
@@ -1460,7 +1466,7 @@ function permTable(rows, filtered){
   return `<table><thead><tr><th>Email</th><th>Role</th><th>Divisions</th><th></th></tr></thead><tbody>${
     rows.map(r=>`<tr><td>${esc(r.email)}</td><td><span class="role-tag">${esc(r.role)}</span></td>
       <td>${(r.divisions&&r.divisions.length)? r.divisions.map(k=>`<span class="chip">${esc(dl(k))}</span>`).join("") : (r.role==="admin"?'<span class="cat-tag">all</span>':'—')}</td>
-      <td class="acts">${DEMO?"":`<button class="linkbtn permEdit" data-email="${esc(r.email)}">Edit</button> <button class="linkbtn permInvite" data-email="${esc(r.email)}">Invite</button> <button class="linkbtn permDel" data-email="${esc(r.email)}">Remove</button>`}</td></tr>`).join("")
+      <td class="acts">${DEMO?"":`<button class="linkbtn permEdit" data-email="${esc(r.email)}">Edit</button> <button class="linkbtn permInvite" data-email="${esc(r.email)}">Invite</button> <button class="linkbtn danger permDel" data-email="${esc(r.email)}">Remove</button>`}</td></tr>`).join("")
   }</tbody></table>`;
 }
 function drawUsers(){
@@ -1470,9 +1476,7 @@ function drawUsers(){
   list.innerHTML=permTable(rows, !!q);
   list.querySelectorAll(".permEdit").forEach(b=>b.onclick=()=>editUser(b.dataset.email));
   list.querySelectorAll(".permInvite").forEach(b=>b.onclick=()=>inviteUser(b.dataset.email));
-  list.querySelectorAll(".permDel").forEach(b=>b.onclick=async()=>{ const em=b.dataset.email; if(!confirm("Remove role for "+em+"?"))return;
-    if(DEMO){ MEM.app_roles=MEM.app_roles.filter(u=>u.email!==em); } else { await sb.from("tf_app_roles").delete().eq("email",em); }
-    state.users=state.users.filter(u=>u.email!==em); drawUsers(); });
+  list.querySelectorAll(".permDel").forEach(b=>b.onclick=()=>deleteUser(b.dataset.email));
 }
 function editUser(email){
   const u=state.users.find(x=>x.email===email); if(!u) return;
@@ -1480,6 +1484,19 @@ function editUser(email){
   const set=new Set(u.divisions||[]); document.querySelectorAll(".pdiv").forEach(c=>c.checked=set.has(c.value));
   $("pRole").dispatchEvent(new Event("change"));
   $("pEmail").focus();
+}
+async function deleteUser(email){
+  email=lc(email);
+  if(email===lc(state.email||"")) return permMsg("You can't remove your own account.","err");
+  if(DEMO){ MEM.app_roles=MEM.app_roles.filter(u=>u.email!==email); state.users=state.users.filter(u=>u.email!==email); drawUsers(); return; }
+  if(!confirm(`Delete the login for ${email}?\n\nThis removes their access to all sites on this account and can't be undone.`)) return;
+  try{
+    const { data, error }=await sb.rpc("tf_admin_delete_user",{ target_email:email });
+    if(error) throw error;
+    if(!data || !data.ok) throw new Error((data&&data.error)||"Remove failed.");
+    state.users=state.users.filter(u=>u.email!==email); drawUsers();
+    permMsg(`Removed ${email} — their login has been deleted.`,"ok");
+  }catch(e){ permMsg("Remove failed: "+e.message,"err"); }
 }
 async function addUser(){
   const email=lc($("pEmail").value), role=$("pRole").value;

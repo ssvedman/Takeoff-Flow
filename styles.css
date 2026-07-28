@@ -48,6 +48,8 @@ header.topbar{background:#fff;border-bottom:1px solid var(--line);position:stick
 .user-chip{font-size:13px;color:var(--muted)}
 .linkbtn{background:none;border:none;color:var(--blue);font-weight:600;font-size:13.5px;padding:6px 8px;border-radius:7px}
 .linkbtn:hover{background:var(--blue-050)}
+.linkbtn.danger{color:#c0392b}
+.linkbtn.danger:hover{background:#fdecea}
 main{max-width:var(--maxw);margin:0 auto;padding:18px 24px 60px}
 
 /* ---------- Tabs ---------- */
