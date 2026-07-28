@@ -210,6 +210,7 @@ async function tryRestore(){
 
 /* --------------- data layer --------------- */
 async function loadDivision(div){
+  clearUndo();   // undo history is scoped to the currently-loaded division
   if(DEMO){
     await ensureSeed();
     state.flow    = MEM.flow_rows.filter(r=>r.division===div).sort(bySort);
@@ -290,6 +291,20 @@ async function savePatch(table, id, patch){
   const body={ ...patch, updated_at:new Date().toISOString(), updated_by:state.email };
   if(DEMO){ const row=(MEM[table]||[]).find(x=>x.id===id); if(row) Object.assign(row,body); return; }
   const { error } = await sb.from(table).update(body).eq("id",id); if(error){ console.error(error); toast("Save failed: "+error.message,"err"); }
+}
+
+/* ---- Undo (Flow tab): reverses THIS browser's recent Flow edits, newest first.
+   Each entry carries an async undo() that writes the prior value(s) back. Cleared on
+   division change so it never reverts rows that aren't loaded. ---- */
+const undoStack=[];
+function pushUndo(entry){ undoStack.push(entry); if(undoStack.length>50) undoStack.shift(); updateUndoBtn(); }
+function clearUndo(){ undoStack.length=0; updateUndoBtn(); }
+function updateUndoBtn(){ const b=$("undoFlowBtn"); if(!b) return; b.disabled=!undoStack.length; b.title=undoStack.length?("Undo "+undoStack[undoStack.length-1].label):"Nothing to undo"; }
+async function doUndo(){
+  const e=undoStack.pop(); if(!e){ return; }
+  try{ await e.undo(); toast("Undid "+e.label+".","ok"); }
+  catch(err){ console.error(err); toast("Undo failed: "+((err&&err.message)||err),"err"); }
+  updateUndoBtn(); render();
 }
 async function deleteRow(table, id){
   if(DEMO){ MEM[table]=MEM[table].filter(x=>x.id!==id); return; }
@@ -391,6 +406,7 @@ function renderFlow(tb,area){
   const rows=sortView(passFilters(flowRows(),cols),cols);
   tb.innerHTML=`<span class="count">${rows.length} row(s)</span>`
     + (canEd?`<button class="btn mini" id="addFlow">+ Add row</button>
+       <button class="btn mini ghost" id="undoFlowBtn" title="Nothing to undo">&#8630; Undo</button>
        <button class="btn mini ghost" id="importBtn">Import Start Schedule…</button>`:"")
     + `<button class="btn mini ghost" data-export>&#8681; Export CSV</button>`
     + `<span class="grow"></span>`
@@ -423,18 +439,26 @@ function renderFlow(tb,area){
   bindGrid(area, saveFlowCell);
   bindHeader(area, cols, flowRows());
   if(canEd){
-    $("addFlow").onclick=async()=>{ const r={ id:uid(), division:state.divKey, sort_order:(state.flow.at(-1)?.sort_order||0)+1 }; state.flow.push(r); await saveRow("flow_rows",r); render(); };
+    $("addFlow").onclick=async()=>{ const r={ id:uid(), division:state.divKey, sort_order:(state.flow.at(-1)?.sort_order||0)+1 }; state.flow.push(r); await saveRow("flow_rows",r);
+      pushUndo({ label:"add row", undo:async()=>{ state.flow=state.flow.filter(x=>x.id!==r.id); await deleteRow("flow_rows",r.id); } }); render(); };
     $("importBtn").onclick=showAdmin;
-    area.querySelectorAll("[data-del]").forEach(b=>b.onclick=async()=>{ if(!confirm("Delete this row?"))return; const id=b.dataset.del; await deleteRow("flow_rows",id); state.flow=state.flow.filter(x=>x.id!==id); render(); });
+    $("undoFlowBtn").onclick=doUndo; updateUndoBtn();
+    area.querySelectorAll("[data-del]").forEach(b=>b.onclick=async()=>{ if(!confirm("Delete this row?"))return; const id=b.dataset.del;
+      const snap={...state.flow.find(x=>x.id===id)};
+      await deleteRow("flow_rows",id); state.flow=state.flow.filter(x=>x.id!==id);
+      pushUndo({ label:"delete row", undo:async()=>{ await saveRow("flow_rows",snap); if(!state.flow.some(x=>x.id===snap.id)){ state.flow.push(snap); state.flow.sort(bySort); } } });
+      render(); });
   }
 }
 async function saveFlowCell(id, field, type, value){
   const r=state.flow.find(x=>x.id===id); if(!r) return;
   const oldVal = r[field]===undefined?null:r[field];
   const newVal = value===""?null:value;
+  if(sameVal(oldVal,newVal)){ render(); return; }   // no-op, nothing to save or undo
   r[field]=newVal;
   const res = await saveField("flow_rows", id, field, newVal, oldVal);
-  if(res && res.ok===false && "current" in res) r[field]=res.current; // show the latest on conflict
+  if(res && res.ok===false && "current" in res) r[field]=res.current; // conflict: show latest, don't record undo
+  else pushUndo({ label:`edit ${field.replace(/_/g," ")}`, undo:async()=>{ const rr=state.flow.find(x=>x.id===id); if(rr) rr[field]=oldVal; await savePatch("flow_rows",id,{[field]:oldVal}); } });
   render(); // recompute dependent calc columns
 }
 
@@ -944,7 +968,7 @@ async function applyBulk(view, field, type, edits){
   if(edits.length>500){ toast("That's over 500 cells — please work in a smaller range.","err"); return; }
   const table=view==="flow"?"flow_rows":"takeoff_changes";
   const arr=view==="flow"?state.flow:state.changes;
-  let conflicts=0;
+  let conflicts=0; const before=[];   // {id, prev} for successfully-changed cells (for undo)
   for(const {id,value} of edits){
     const r=arr.find(x=>x.id===id); if(!r) continue;
     const oldVal=r[field]===undefined?null:r[field];
@@ -953,6 +977,13 @@ async function applyBulk(view, field, type, edits){
     r[field]=newVal;
     const res=await saveField(table,id,field,newVal,oldVal);
     if(res && res.ok===false && "current" in res){ r[field]=res.current; conflicts++; }
+    else before.push({id, prev:oldVal});
+  }
+  if(view==="flow" && before.length){
+    pushUndo({ label:`${field.replace(/_/g," ")} × ${before.length}`, undo:async()=>{
+      for(const b of before){ const rr=state.flow.find(x=>x.id===b.id); if(rr) rr[field]=b.prev; }
+      for(const b of before){ await savePatch("flow_rows", b.id, {[field]:b.prev}); }
+    }});
   }
   render();
   if(conflicts) toast(conflicts+" cell(s) weren't saved — changed by someone else. Latest values shown.","err");
