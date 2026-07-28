@@ -1205,12 +1205,13 @@ function parseStartSchedule(wb, div){
   const sheet = (want && find(want)) || find("Permit Log") || find("Start Log") || find("START SCHEDULE") || wb.SheetNames[0];
   const rows=XLSX.utils.sheet_to_json(wb.Sheets[sheet],{defval:null});
   const commNum=r=>{ const job=digits(r["Job"]); return job.length>=7 ? job.slice(0,7)+"0000" : (S(r["Comm"])||""); };  // first 7 digits = community (handles model/spec jobs like 1116272S111)
-  // Pre-count building sizes so plex lots become "{N}-PLEX" like the workbook does.
-  // Count units per building INSTANCE = community + building + projected-start (matches the
-  // workbook's COUNTIFS(Start, Bldg)); avoids over-counting a reused building id across phases.
-  const startKey=r=>String(r["Start (Prj)"]??r["PrjStart"]??r["Start (Act)"]??r["ActStart"]??"");
+  // Pre-count building sizes so plex lots become "{N}-PLEX". Count units per PHYSICAL
+  // building = community + building id. (Community is already in the key, so reused
+  // building ids across communities don't collide.) We deliberately do NOT split by
+  // start date: a plex is one structure even when its lots have staggered projected
+  // starts, so splitting produced bogus counts like a "1-PLEX" + "6-PLEX" from one 7-plex.
   const bldgCount={};
-  for(const r of rows){ const b=S(r["Bldg"]); if(b){ const k=commNum(r)+"|"+b+"|"+startKey(r); bldgCount[k]=(bldgCount[k]||0)+1; } }
+  for(const r of rows){ const b=S(r["Bldg"]); if(b){ const k=commNum(r)+"|"+b; bldgCount[k]=(bldgCount[k]||0)+1; } }
   const idName={}; const groups=new Map();
   for(const r of rows){
     let comm=null, num="", plan=null, ev=null, trench=null; const bldg=S(r["Bldg"]);
@@ -1225,7 +1226,7 @@ function parseStartSchedule(wb, div){
       trench = xlDate(r["ActStart"])||xlDate(r["PrjStart"]);
     } else continue;
     // plex transform: buildings → "{units}-PLEX", elevation → first letter (matches the Flow grid)
-    if(bldg){ const cnt=bldgCount[num+"|"+bldg+"|"+startKey(r)]; if(cnt) plan=cnt+"-PLEX"; if(ev) ev=ev.charAt(0); }
+    if(bldg){ const cnt=bldgCount[num+"|"+bldg]; if(cnt) plan=cnt+"-PLEX"; if(ev) ev=ev.charAt(0); }
     const name = comm || idName[num] || num;
     if(!num || !plan) continue;
     const key=[num,lc(plan),lc(ev||"")].join("|");   // dedup by community NUMBER (names differ between systems)
@@ -1242,7 +1243,10 @@ async function buildImportPreview(){
   // A combination = community NUMBER + plan + elevation. Only genuinely new combinations are added.
   // Plex plans are normalized (the "{N}-PLEX" unit count is unreliable between the log and the grid),
   // so a plex is matched by community + "PLEX" + elevation.
-  const normPlan=p=>{ const s=lc(p); return /^\d+\s*-?\s*plex$/.test(s) ? "plex" : s; };
+  // Canonicalize plex plans to "{N}-plex" (keeping the unit count) so a 7-PLEX only
+  // matches a 7-PLEX — collapsing all sizes to "plex" made a 7-PLEX inherit the
+  // community-wide earliest plex start (a smaller building), showing a wrong date.
+  const normPlan=p=>{ const s=lc(p); const m=s.match(/^(\d+)\s*-?\s*plex$/); return m ? m[1]+"-plex" : s; };
   const combo=(num,plan,ev)=>[String(num||"").trim(),normPlan(plan),lc(ev||"")].join("|");
   const existing=new Set(existRows.map(r=>combo(r.community_num,r.plan,r.elevation)));
   const existingNumPlan=new Set(existRows.map(r=>String(r.community_num||"").trim()+"|"+normPlan(r.plan)));  // for elevation-less plex
@@ -1422,52 +1426,71 @@ async function openWhatsNew(){
 }
 function safeJSON(s){ try{ return JSON.parse(s); }catch(e){ return null; } }
 
-/* ---- user / role management (admin only) ---- */
+/* ---- Access & permissions (admin only) ---- */
 async function renderPerms(){
   const p=$("permsPanel");
   if(!isAdmin()){ p.innerHTML=`<div class="panel"><div class="panel-h">Access</div><div style="padding:16px"><p class="tiny" style="text-align:left;margin:0">You can import and edit data for your division(s). Only an admin can change user roles.</p></div></div>`; return; }
   // load users
   if(DEMO){ state.users=MEM.app_roles.slice(); }
   else{ try{ const { data }=await sb.from("tf_app_roles").select("*").order("email"); state.users=data||[]; }catch(e){ state.users=[]; } }
-  const divOpts=CFG.DIVISIONS.map(d=>`<label class="permchk"><input type="checkbox" class="pdiv" value="${d.key}"> ${esc(d.label)}</label>`).join("");
-  let h=`<div class="panel"><div class="panel-h">Users &amp; roles</div><div style="padding:16px">
-    <div class="permform">
-      <input type="email" id="pEmail" placeholder="name@lennar.com">
-      <select id="pRole"><option value="viewer">viewer</option><option value="editor">editor</option><option value="purchasing">purchasing</option><option value="admin">admin</option></select>
-      <span class="permdivs" id="pDivs">${divOpts}</span>
-      <button class="btn mini" id="pAdd">Save user</button>
-    </div>
-    <p class="tiny" style="text-align:left;margin:0 0 12px">Divisions apply to <b>editor</b> and <b>purchasing</b> roles. Everyone at ${esc(CFG.ALLOWED_DOMAIN)} is a viewer by default.</p>
-    <input type="text" id="userSearch" placeholder="Search users by email, role, or division…" style="width:100%;margin:0 0 10px">
-    <div id="userList"></div>
-  </div></div>`;
-  p.innerHTML=h;
+  const divChecks=CFG.DIVISIONS.map(d=>`<label class="permchk"><input type="checkbox" class="pdiv" value="${d.key}"> ${esc(d.label)}</label>`).join("");
+  p.innerHTML=`<div class="panel"><div class="panel-h">Access &amp; permissions</div>
+    <div style="padding:16px">
+      <p class="tiny" style="text-align:left;margin:0 0 12px">Everyone at ${esc(CFG.ALLOWED_DOMAIN)} can view. Grant <b>editor</b> or <b>purchasing</b> (for the chosen divisions), or <b>admin</b> (full access).</p>
+      <div class="permform">
+        <input type="email" id="pEmail" placeholder="user@lennar.com">
+        <select id="pRole"><option value="viewer">viewer</option><option value="editor">editor</option><option value="purchasing">purchasing</option><option value="admin">admin</option></select>
+        <span class="permdivs" id="pDivs">${divChecks}</span>
+        <button class="btn mini" id="pAdd">Save user</button>
+      </div>
+      <div id="permMsg" class="msg"></div>
+      <input type="text" id="userSearch" class="permsearch" placeholder="Search users by email, role, or division…">
+      <div class="table-wrap" id="userList"></div>
+    </div></div>`;
+  const toggleDivs=()=>{ $("pDivs").style.display = ["editor","purchasing"].includes($("pRole").value) ? "inline-flex":"none"; };
+  $("pRole").addEventListener("change",toggleDivs); toggleDivs();
   $("pAdd").onclick=addUser;
-  const us=$("userSearch"); if(us) us.oninput=drawUsers;
+  $("userSearch").oninput=drawUsers;
   drawUsers();
+}
+function permMsg(t,k){ const m=$("permMsg"); if(m){ m.className="msg "+(k||"info"); m.textContent=t; } }
+function permTable(rows, filtered){
+  if(!rows.length) return `<div class="empty">${filtered?"No users match your search.":`No explicit roles yet — everyone at ${esc(CFG.ALLOWED_DOMAIN)} is a viewer.`}</div>`;
+  const dl=k=>(CFG.DIVISIONS.find(d=>d.key===k)||{}).label||k;
+  return `<table><thead><tr><th>Email</th><th>Role</th><th>Divisions</th><th></th></tr></thead><tbody>${
+    rows.map(r=>`<tr><td>${esc(r.email)}</td><td><span class="role-tag">${esc(r.role)}</span></td>
+      <td>${(r.divisions&&r.divisions.length)? r.divisions.map(k=>`<span class="chip">${esc(dl(k))}</span>`).join("") : (r.role==="admin"?'<span class="cat-tag">all</span>':'—')}</td>
+      <td class="acts">${DEMO?"":`<button class="linkbtn permEdit" data-email="${esc(r.email)}">Edit</button> <button class="linkbtn permInvite" data-email="${esc(r.email)}">Invite</button> <button class="linkbtn permDel" data-email="${esc(r.email)}">Remove</button>`}</td></tr>`).join("")
+  }</tbody></table>`;
 }
 function drawUsers(){
   const list=$("userList"); if(!list) return;
-  if(!state.users.length){ list.innerHTML=`<p class="tiny" style="text-align:left;margin:0">No custom roles yet.</p>`; return; }
   const q=lc(($("userSearch")&&$("userSearch").value)||"");
   const rows=q ? state.users.filter(u=>lc(u.email).includes(q)||lc(u.role).includes(q)||(u.divisions||[]).some(d=>lc(d).includes(q))) : state.users;
-  if(!rows.length){ list.innerHTML=`<p class="tiny" style="text-align:left;margin:0">No users match “${esc(q)}”.</p>`; return; }
-  list.innerHTML=rows.map(u=>`<div class="userrow"><span class="em">${esc(u.email)}</span><span class="role-tag">${esc(u.role)}</span>${(u.divisions||[]).map(d=>`<span class="badge" style="background:var(--navy)">${esc(d)}</span>`).join(" ")}<button class="btn mini ghost" data-invite="${esc(u.email)}">Invite</button><button class="btn mini danger" data-deluser="${esc(u.email)}">Remove</button></div>`).join("");
-  list.querySelectorAll("[data-invite]").forEach(b=>b.onclick=()=>inviteUser(b.dataset.invite));
-  list.querySelectorAll("[data-deluser]").forEach(b=>b.onclick=async()=>{ const em=b.dataset.deluser; if(!confirm("Remove role for "+em+"?"))return;
+  list.innerHTML=permTable(rows, !!q);
+  list.querySelectorAll(".permEdit").forEach(b=>b.onclick=()=>editUser(b.dataset.email));
+  list.querySelectorAll(".permInvite").forEach(b=>b.onclick=()=>inviteUser(b.dataset.email));
+  list.querySelectorAll(".permDel").forEach(b=>b.onclick=async()=>{ const em=b.dataset.email; if(!confirm("Remove role for "+em+"?"))return;
     if(DEMO){ MEM.app_roles=MEM.app_roles.filter(u=>u.email!==em); } else { await sb.from("tf_app_roles").delete().eq("email",em); }
     state.users=state.users.filter(u=>u.email!==em); drawUsers(); });
 }
+function editUser(email){
+  const u=state.users.find(x=>x.email===email); if(!u) return;
+  $("pEmail").value=u.email; $("pRole").value=u.role;
+  const set=new Set(u.divisions||[]); document.querySelectorAll(".pdiv").forEach(c=>c.checked=set.has(c.value));
+  $("pRole").dispatchEvent(new Event("change"));
+  $("pEmail").focus();
+}
 async function addUser(){
   const email=lc($("pEmail").value), role=$("pRole").value;
-  if(!email.endsWith(CFG.ALLOWED_DOMAIN)) return adminMsg("Email must be "+CFG.ALLOWED_DOMAIN,"err");
-  const divisions=[...document.querySelectorAll(".pdiv:checked")].map(c=>c.value);
+  if(!email.endsWith(CFG.ALLOWED_DOMAIN)) return permMsg("Email must be "+CFG.ALLOWED_DOMAIN,"err");
+  const divisions=["editor","purchasing"].includes(role) ? [...document.querySelectorAll(".pdiv:checked")].map(c=>c.value) : [];
   const row={ email, role, divisions };
   if(DEMO){ const i=MEM.app_roles.findIndex(u=>u.email===email); if(i>=0)MEM.app_roles[i]=row; else MEM.app_roles.push(row); }
-  else{ const { error }=await sb.from("tf_app_roles").upsert(row); if(error) return adminMsg("Save failed: "+error.message,"err"); }
+  else{ const { error }=await sb.from("tf_app_roles").upsert(row); if(error) return permMsg("Save failed: "+error.message,"err"); }
   const i=state.users.findIndex(u=>u.email===email); if(i>=0)state.users[i]=row; else state.users.push(row);
   $("pEmail").value=""; document.querySelectorAll(".pdiv:checked").forEach(c=>c.checked=false);
-  adminMsg("Saved "+email+" as "+role+".","ok"); drawUsers();
+  permMsg("Saved "+email+" as "+role+".","ok"); drawUsers();
 }
 /* Add user / reset password — generates a one-time link (admin only). Relies on the
    shared Supabase RPCs admin_add_or_reset() and redeem_reset_token(). No email is sent. */
