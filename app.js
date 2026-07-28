@@ -409,8 +409,8 @@ function renderFlow(tb,area){
         const tt=ov?' title="Manual override — click and clear to reset to auto"':'';
         h+=`<td class="calc ${ov?'overridden':''}"${tt}><span class="cell ${canEd?'editable':''} ${val?'':'empty'}" data-id="${r.id}" data-field="${c.f}" data-type="date"><span class="val">${esc(fmtDate(val))}</span></span></td>`;
       }else if(c.get){
-        const disp=c.get(r)||"";
-        h+=cellHTML(r.id,c,disp,disp,canEd);   // editable; saving stores an override in r[c.f]
+        const disp=c.get(r)||"";   // read-only (e.g. Plan Name) — managed in Admin › Plan names
+        h+=`<td><span class="cell ${disp?'':'empty'}" data-id="${r.id}" data-field="${c.f}" data-type="text"><span class="val">${esc(disp)}</span></span></td>`;
       }else{
         const raw=r[c.f], disp=c.type==="date"?fmtDate(raw):(raw==null?"":String(raw));
         h+=cellHTML(r.id,c,disp,raw,canEd);
@@ -430,39 +430,12 @@ function renderFlow(tb,area){
 }
 async function saveFlowCell(id, field, type, value){
   const r=state.flow.find(x=>x.id===id); if(!r) return;
-  if(field==="plan_name"){ await setPlanName(r, value); return; }   // maps to tf_plan_names, not a per-row value
   const oldVal = r[field]===undefined?null:r[field];
   const newVal = value===""?null:value;
   r[field]=newVal;
   const res = await saveField("flow_rows", id, field, newVal, oldVal);
   if(res && res.ok===false && "current" in res) r[field]=res.current; // show the latest on conflict
   render(); // recompute dependent calc columns
-}
-/* Set/rename a plan's name. Updates the tf_plan_names lookup (so every row in that
-   division with the plan number reflects it), and keeps same-named plans in OTHER
-   divisions in sync when renaming. Clearing the name removes the mapping. */
-async function setPlanName(row, rawName){
-  const div=row.division, planNo=String(row.plan==null?"":row.plan).trim().toUpperCase();
-  if(!planNo){ render(); return; }
-  const name=(rawName==null?"":String(rawName)).trim();
-  state.planNames=state.planNames||{};
-  const map=state.planNames[div]=state.planNames[div]||{};
-  const oldName=map[planNo]||"";
-  if(!name){                                   // clear mapping for this division + plan
-    delete map[planNo];
-    if(!DEMO){ try{ await sb.from("tf_plan_names").delete().eq("division",div).eq("plan_no",planNo); }catch(e){ console.warn(e); } }
-    render(); return;
-  }
-  map[planNo]=name;
-  const upserts=[{division:div, plan_no:planNo, name}];
-  if(oldName && lc(oldName)!==lc(name)){       // rename → keep same-named plans in other divisions in sync
-    for(const d in state.planNames){ if(d===div) continue;
-      const m=state.planNames[d];
-      for(const pn in m){ if(lc(m[pn])===lc(oldName)){ m[pn]=name; upserts.push({division:d, plan_no:pn, name}); } }
-    }
-  }
-  if(!DEMO){ try{ await sb.from("tf_plan_names").upsert(upserts,{onConflict:"division,plan_no"}); }catch(e){ console.warn("plan name save failed",e); } }
-  render();
 }
 
 /* ===================================================================
@@ -974,7 +947,6 @@ async function applyBulk(view, field, type, edits){
   let conflicts=0;
   for(const {id,value} of edits){
     const r=arr.find(x=>x.id===id); if(!r) continue;
-    if(view==="flow" && field==="plan_name"){ await setPlanName(r, value); continue; }
     const oldVal=r[field]===undefined?null:r[field];
     const newVal=(value===""||value==null)?null:value;
     if(sameVal(oldVal,newVal)) continue;
@@ -1140,7 +1112,9 @@ function showAdmin(){
   const sel=$("adminDiv"); sel.innerHTML="";
   CFG.DIVISIONS.filter(d=>canEditDiv(d.key)).forEach(d=>{ const o=document.createElement("option"); o.value=d.key; o.textContent=d.label; sel.appendChild(o); });
   if(!sel.value && sel.options.length) sel.value=sel.options[0].value;
+  sel.onchange=renderPlanNames;   // plan-name tile follows the selected division
   bindImport();
+  renderPlanNames();
   renderPerms();
   renderResetLinks();
 }
@@ -1582,6 +1556,65 @@ function showInviteModal(email, url, note){
     ov.querySelector("#inviteCopy").onclick=()=>{ i.select(); i.setSelectionRange(0,99999);
       if(navigator.clipboard) navigator.clipboard.writeText(i.value); else document.execCommand("copy");
       const b=ov.querySelector("#inviteCopy"); b.textContent="Copied"; setTimeout(()=>b.textContent="Copy",1500); }; }
+}
+
+/* ---- Plan names (admin tile): editors/admins manage the plan# → name mapping (tf_plan_names)
+   for the selected division. The Flow / Budgets / To-Do tabs show these names read-only. ---- */
+function renderPlanNames(){
+  const p=$("planNamesPanel"); if(!p) return;
+  const div=$("adminDiv").value;
+  if(!div || !(isAdmin()||canEditDiv(div))){ p.innerHTML=""; return; }
+  const label=(CFG.DIVISIONS.find(d=>d.key===div)||{}).label||div;
+  p.innerHTML=`<div class="panel"><div class="panel-h">Plan names — ${esc(label)}</div>
+    <div style="padding:16px">
+      <p class="tiny" style="text-align:left;margin:0 0 12px">Map a plan number to a plan name. Names show (read-only) on the Flow, Pending Budgets, and To-Do tabs for this division.</p>
+      <div class="permform">
+        <input type="text" id="pnNo" placeholder="Plan # (e.g. 1447)" style="max-width:150px">
+        <input type="text" id="pnName" placeholder="Plan name">
+        <button class="btn mini" id="pnAdd">Save</button>
+      </div>
+      <div id="pnMsg" class="msg"></div>
+      <input type="text" id="pnSearch" class="permsearch" placeholder="Search plan # or name…">
+      <div class="table-wrap" id="pnList"></div>
+    </div></div>`;
+  $("pnAdd").onclick=()=>savePlanNameRow(div);
+  $("pnSearch").oninput=()=>drawPlanNames(div);
+  $("pnNo").addEventListener("keydown",e=>{ if(e.key==="Enter") $("pnName").focus(); });
+  $("pnName").addEventListener("keydown",e=>{ if(e.key==="Enter") savePlanNameRow(div); });
+  drawPlanNames(div);
+}
+function pnMsg(t,k){ const m=$("pnMsg"); if(m){ m.className="msg "+(k||"info"); m.textContent=t; } }
+function drawPlanNames(div){
+  const list=$("pnList"); if(!list) return;
+  const map=(state.planNames&&state.planNames[div])||{};
+  const q=lc(($("pnSearch")&&$("pnSearch").value)||"");
+  let rows=Object.keys(map).map(pn=>({plan_no:pn, name:map[pn]}));
+  rows.sort((a,b)=>String(a.plan_no).localeCompare(String(b.plan_no),undefined,{numeric:true}));
+  if(q) rows=rows.filter(r=>lc(r.plan_no).includes(q)||lc(r.name).includes(q));
+  if(!rows.length){ list.innerHTML=`<div class="empty">${q?"No plans match your search.":"No plan names mapped yet for this division."}</div>`; return; }
+  list.innerHTML=`<table><thead><tr><th>Plan #</th><th>Plan name</th><th></th></tr></thead><tbody>${
+    rows.map(r=>`<tr><td>${esc(r.plan_no)}</td><td>${esc(r.name)}</td>
+      <td class="acts"><button class="linkbtn pnEdit" data-no="${esc(r.plan_no)}">Edit</button> <button class="linkbtn pnDel" data-no="${esc(r.plan_no)}">Remove</button></td></tr>`).join("")
+  }</tbody></table>`;
+  list.querySelectorAll(".pnEdit").forEach(b=>b.onclick=()=>{ const no=b.dataset.no; $("pnNo").value=no; $("pnName").value=map[no]||""; $("pnName").focus(); });
+  list.querySelectorAll(".pnDel").forEach(b=>b.onclick=()=>delPlanNameRow(div,b.dataset.no));
+}
+async function savePlanNameRow(div){
+  const no=String($("pnNo").value||"").trim().toUpperCase();
+  const name=String($("pnName").value||"").trim();
+  if(!no) return pnMsg("Enter a plan number.","err");
+  if(!name) return pnMsg("Enter a plan name.","err");
+  state.planNames=state.planNames||{}; const m=state.planNames[div]=state.planNames[div]||{};
+  m[no]=name;
+  if(!DEMO){ const { error }=await sb.from("tf_plan_names").upsert({division:div, plan_no:no, name},{onConflict:"division,plan_no"}); if(error){ delete m[no]; return pnMsg("Save failed: "+error.message,"err"); } }
+  $("pnNo").value=""; $("pnName").value=""; pnMsg("Saved "+no+" → "+name+".","ok");
+  drawPlanNames(div);
+}
+async function delPlanNameRow(div, no){
+  if(!confirm("Remove the plan name for "+no+"?")) return;
+  const m=(state.planNames&&state.planNames[div])||{}; const prev=m[no]; delete m[no];
+  if(!DEMO){ const { error }=await sb.from("tf_plan_names").delete().eq("division",div).eq("plan_no",no); if(error){ m[no]=prev; return pnMsg("Delete failed: "+error.message,"err"); } }
+  pnMsg("Removed "+no+".","ok"); drawPlanNames(div);
 }
 
 /* ---------------- DEMO seed ----------------
