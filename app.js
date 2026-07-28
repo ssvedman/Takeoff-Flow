@@ -324,7 +324,7 @@ function bootApp(){
   applyPrefs();                    // restore last division, tab, sorts, and column filters
   sel.value=state.divKey;
   document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("active", t.dataset.view===state.view));
-  sel.onchange=async()=>{ state.divKey=sel.value; await loadDivision(state.divKey); render(); };
+  sel.onchange=async()=>{ state.divKey=sel.value; await loadDivision(state.divKey); render(); renderPlanNames(); };
   // tabs
   document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>{ document.querySelectorAll(".tab").forEach(x=>x.classList.remove("active")); t.classList.add("active"); state.view=t.dataset.view; state.filter=""; $("globalSearch").value=""; render(); });
   // topbar buttons
@@ -1112,9 +1112,8 @@ function showAdmin(){
   const sel=$("adminDiv"); sel.innerHTML="";
   CFG.DIVISIONS.filter(d=>canEditDiv(d.key)).forEach(d=>{ const o=document.createElement("option"); o.value=d.key; o.textContent=d.label; sel.appendChild(o); });
   if(!sel.value && sel.options.length) sel.value=sel.options[0].value;
-  sel.onchange=renderPlanNames;   // plan-name tile follows the selected division
   bindImport();
-  renderPlanNames();
+  renderPlanNames();   // follows the header division (state.divKey)
   renderPerms();
   renderResetLinks();
 }
@@ -1407,11 +1406,18 @@ async function renderPerms(){
   // load users — all login accounts (shared across apps) with their Takeoff-Flow role
   if(DEMO){ state.users=MEM.app_roles.slice(); }
   else{
+    let list=[];
     try{ const { data, error }=await sb.rpc("tf_admin_list_users"); if(error) throw error;
-      state.users=(data||[]).map(u=>({email:u.email,role:u.role,divisions:u.divisions||[]}));
-    }catch(e){
-      try{ const { data }=await sb.from("tf_app_roles").select("*").order("email"); state.users=data||[]; }catch(e2){ state.users=[]; }
-    }
+      list=(data||[]).map(u=>({email:u.email,role:u.role,divisions:u.divisions||[]}));
+    }catch(e){ console.warn("tf_admin_list_users failed, using tf_app_roles only",e); }
+    // Always merge in tf_app_roles rows so people who were given a role but don't have a
+    // login account yet (e.g. Tampa editors added before their first sign-in) still appear.
+    try{ const { data }=await sb.from("tf_app_roles").select("email,role,divisions").order("email");
+      const have=new Set(list.map(u=>lc(u.email)));
+      (data||[]).forEach(r=>{ if(!have.has(lc(r.email))) list.push({email:r.email, role:r.role, divisions:r.divisions||[]}); });
+    }catch(e){}
+    list.sort((a,b)=>String(a.email).localeCompare(String(b.email)));
+    state.users=list;
   }
   const divChecks=CFG.DIVISIONS.map(d=>`<label class="permchk"><input type="checkbox" class="pdiv" value="${d.key}"> ${esc(d.label)}</label>`).join("");
   p.innerHTML=`<div class="panel"><div class="panel-h">Access &amp; permissions</div>
@@ -1562,7 +1568,7 @@ function showInviteModal(email, url, note){
    for the selected division. The Flow / Budgets / To-Do tabs show these names read-only. ---- */
 function renderPlanNames(){
   const p=$("planNamesPanel"); if(!p) return;
-  const div=$("adminDiv").value;
+  const div=state.divKey;   // follow the header division selector
   if(!div || !(isAdmin()||canEditDiv(div))){ p.innerHTML=""; return; }
   const label=(CFG.DIVISIONS.find(d=>d.key===div)||{}).label||div;
   p.innerHTML=`<div class="panel"><div class="panel-h">Plan names — ${esc(label)}</div>
@@ -1638,7 +1644,7 @@ function openPlanNameModal(tileDiv, orig){
       state.planNames=state.planNames||{}; const m2=state.planNames[division]=state.planNames[division]||{}; m2[no]=name;
       if(!DEMO){ const { error }=await sb.from("tf_plan_names").upsert({division, plan_no:no, name},{onConflict:"division,plan_no"}); if(error) throw error; }
       close();
-      const cur=$("adminDiv")?$("adminDiv").value:division; drawPlanNames(cur);
+      drawPlanNames(state.divKey);
       pnMsg("Saved "+no+" → "+name+" ("+((CFG.DIVISIONS.find(d=>d.key===division)||{}).label||division)+").","ok");
     }catch(e){ msg("Save failed: "+((e&&e.message)||e),"err"); btn.disabled=false; }
   };
