@@ -15,12 +15,12 @@ const HOLIDAYS = new Set(CFG.HOLIDAYS || []);
 
 const state = {
   email:null, role:"viewer", roleDivs:[], divKey:null, view:"flow", filter:"",
-  flow:[], cols:[], checks:{}, status:{}, changes:[], users:[],
+  flow:[], cols:[], checks:{}, status:{}, changes:[], users:[], locLock:null,
   sort:{}, colFilters:{}   // per-view column sort + per-column filter text
 };
 
 /* in-memory store for DEMO mode */
-const MEM = { app_roles:[], flow_rows:[], pending_budget_cols:[], pending_budget_checks:[], pending_budget_status:[], takeoff_changes:[], change_log:[] };
+const MEM = { app_roles:[], flow_rows:[], pending_budget_cols:[], pending_budget_checks:[], pending_budget_status:[], takeoff_changes:[], change_log:[], locLocks:{} };
 
 /* ---------------- helpers ---------------- */
 const $   = id => document.getElementById(id);
@@ -116,6 +116,14 @@ const canAddChange  = k => canEditDiv(k) || (state.role==="purchasing" && (state
 function canToggleCheck(col){
   if(canEditDiv(state.divKey)) return true;
   return state.role==="purchasing" && lc(col.assigned_email)===lc(state.email);
+}
+/* Sent-to-LOC: editors/admins always; if the column is locked to a user, only that
+   user; if unlocked, anyone at the domain may check it. */
+function canToggleSentToLoc(){
+  if(canEditDiv(state.divKey)) return true;
+  const a=state.locLock;
+  if(!a) return true;                    // unlocked → anyone
+  return lc(a)===lc(state.email);        // locked → the assigned user only
 }
 
 /* ---------------- auth ---------------- */
@@ -218,15 +226,18 @@ async function loadDivision(div){
     state.changes = MEM.takeoff_changes.filter(c=>c.division===div).sort((a,b)=>(b.req_date||"").localeCompare(a.req_date||""));
     state.checks  = keyChecks(MEM.pending_budget_checks);
     state.status  = keyStatus(MEM.pending_budget_status);
+    state.locLock = (MEM.locLocks||{})[div] || null;
     return;
   }
-  const [flow, cols, checks, status, changes] = await Promise.all([
+  const [flow, cols, checks, status, changes, lock] = await Promise.all([
     sbAll(()=>sb.from("flow_rows").select("*").eq("division",div)),
     sbAll(()=>sb.from("pending_budget_cols").select("*").eq("division",div)),
     sbAll(()=>sb.from("pending_budget_checks").select("*")),
     sbAll(()=>sb.from("pending_budget_status").select("*")),
-    sbAll(()=>sb.from("takeoff_changes").select("*").eq("division",div))
+    sbAll(()=>sb.from("takeoff_changes").select("*").eq("division",div)),
+    (async()=>{ try{ const { data }=await sb.from("tf_loc_locks").select("assigned_email").eq("division",div).maybeSingle(); return data; }catch(e){ return null; } })()
   ]);
+  state.locLock = (lock && lock.assigned_email && String(lock.assigned_email).trim()) || null;
   state.flow    = flow.sort(bySort);
   state.cols    = cols.sort(bySort);
   state.changes = changes.sort((a,b)=>(b.req_date||"").localeCompare(a.req_date||""));
@@ -321,6 +332,45 @@ async function saveStatus(flow_id, patch){
   state.status[flow_id]={sim_reviewed:row.sim_reviewed, sent_to_loc:row.sent_to_loc};
   if(DEMO){ const a=MEM.pending_budget_status; const i=a.findIndex(x=>x.flow_id===flow_id); if(i>=0)a[i]=row; else a.push(row); return; }
   const { error } = await sb.from("pending_budget_status").upsert(row,{ onConflict:"flow_id" }); if(error) toast("Save failed: "+error.message,"err");
+}
+/* Sent-to-LOC toggles go through an RPC that enforces the per-division lock server-side
+   (and only ever touches sent_to_loc, so sim_reviewed stays editor-only). */
+async function saveSentToLoc(flow_id, val){
+  if(DEMO){ const a=MEM.pending_budget_status; const i=a.findIndex(x=>x.flow_id===flow_id); if(i>=0)a[i].sent_to_loc=val; else a.push({flow_id,sim_reviewed:false,sent_to_loc:val}); return; }
+  const { error } = await sb.rpc("tf_set_sent_to_loc",{ p_flow_id:flow_id, p_value:val }); if(error) toast("Save failed: "+error.message,"err");
+}
+/* Editor/admin sets or clears the user the Sent-to-LOC column is locked to (per division). */
+function openLocLockModal(){
+  const div=state.divKey, cur=state.locLock||"";
+  document.querySelectorAll(".modal-ov").forEach(m=>m.remove());
+  const ov=document.createElement("div"); ov.className="modal-ov";
+  ov.innerHTML=`<div class="modal-card" style="max-width:460px">
+    <div class="modal-h">Lock “Sent to LOC”<button class="linkbtn" data-x aria-label="Close">&times;</button></div>
+    <div class="modal-body">
+      <p class="tiny" style="text-align:left;margin:0 0 12px">Lock this column to one person so only they (plus editors and admins) can tick it. Leave it blank and <b>anyone</b> can check the boxes.</p>
+      <label class="fld" for="llEmail">Locked to</label>
+      <input type="email" id="llEmail" placeholder="name@lennar.com" value="${esc(cur)}"${state.users&&state.users.length?' list="llUsers"':''}>
+      ${state.users&&state.users.length?`<datalist id="llUsers">${state.users.map(u=>`<option value="${esc(u.email)}">`).join("")}</datalist>`:""}
+      <div id="llMsg" class="msg"></div>
+      <div class="modal-actions" style="margin-top:14px"><button class="btn" id="llSave">Save</button>${cur?`<button class="btn ghost" id="llClear">Remove lock</button>`:""}<button class="btn ghost" id="llCancel">Cancel</button></div>
+    </div></div>`;
+  document.body.appendChild(ov);
+  const close=()=>ov.remove();
+  ov.addEventListener("click",e=>{ if(e.target===ov) close(); });
+  ov.querySelector("[data-x]").onclick=close; ov.querySelector("#llCancel").onclick=close;
+  const msg=(t,k)=>{ const m=ov.querySelector("#llMsg"); m.className="msg "+(k||"info"); m.textContent=t; };
+  ov.querySelector("#llSave").onclick=async()=>{
+    const email=lc(ov.querySelector("#llEmail").value);
+    if(email && !email.endsWith(CFG.ALLOWED_DOMAIN)) return msg("Email must be "+CFG.ALLOWED_DOMAIN,"err");
+    if(!email){ await clearLocLock(div); close(); return; }
+    if(DEMO){ MEM.locLocks[div]=email; } else { const { error }=await sb.from("tf_loc_locks").upsert({division:div, assigned_email:email, updated_by:state.email, updated_at:new Date().toISOString()},{onConflict:"division"}); if(error) return msg("Save failed: "+error.message,"err"); }
+    state.locLock=email; close(); render();
+  };
+  const clr=ov.querySelector("#llClear"); if(clr) clr.onclick=async()=>{ await clearLocLock(div); close(); };
+}
+async function clearLocLock(div){
+  if(DEMO){ delete MEM.locLocks[div]; } else { try{ await sb.from("tf_loc_locks").delete().eq("division",div); }catch(e){ toast("Could not remove lock: "+(e.message||e),"err"); return; } }
+  state.locLock=null; render();
 }
 
 function toast(msg,kind){ const b=$("banner"); if(!b) return; b.innerHTML=`<b>${esc(msg)}</b>`; b.style.color=kind==="err"?"var(--bad)":""; setTimeout(()=>{ setBanner(); },4000); }
@@ -486,6 +536,10 @@ function renderBudgets(tb,area){
       title=c.assigned_email?` title="Assigned to ${esc(c.assigned_email)}"`:` title="Unassigned — no one can tick this column yet"`;
       extra=canMng?`<span class="colhead-tools"><button data-editcol="${c.id}" title="Edit column">&#9998;</button><button data-delcol="${c.id}" title="Remove column">&times;</button></span>`
                   :(c.assigned_email?"":`<span class="colhead-flag">unassigned</span>`); }
+    if(col.f==="sent"){ const a=state.locLock;
+      title=a?` title="Locked to ${esc(a)} — only they (and editors) can check it"`:` title="Unlocked — anyone can check it"`;
+      extra=canMng?`<span class="colhead-tools"><button data-loclock title="${a?"Locked to "+esc(a)+" — click to change":"Lock to a user"}">${a?"&#128274;":"&#128275;"}</button></span>`
+                  :(a?`<span class="colhead-flag">${esc(a.split("@")[0])}</span>`:""); }
     h+=`<th${title} class="${col.cls||""} sorth" data-sort="${col.f}">${esc(col.h)}${col.calc?'<span class="calc-badge">auto</span>':""}<span class="sort-ind">${ind}</span>${extra}</th>`;
   });
   h+=`</tr><tr class="filterrow">`;
@@ -505,7 +559,7 @@ function renderBudgets(tb,area){
       h+=`<td class="chkcell"><input type="checkbox" class="chk" data-chk="${r.id}" data-col="${c.id}" ${on?"checked":""} ${allow?"":"disabled"}></td>`;
     });
     h+=`<td class="chkcell"><input type="checkbox" class="chk" data-st="${r.id}" data-k="sim_reviewed" ${st.sim_reviewed?"checked":""} ${canEd?"":"disabled"}></td>`
-      + `<td class="chkcell"><input type="checkbox" class="chk" data-st="${r.id}" data-k="sent_to_loc" ${st.sent_to_loc?"checked":""} ${canEd?"":"disabled"}></td>`
+      + `<td class="chkcell"><input type="checkbox" class="chk" data-st="${r.id}" data-k="sent_to_loc" ${st.sent_to_loc?"checked":""} ${canToggleSentToLoc()?"":"disabled"}></td>`
       + `<td class="calc"><span class="cell"><span class="val">${esc(fmtDate(workday(r.first_trench_date,-30,true)))}</span></span></td>`
       + `<td class="calc"><span class="cell"><span class="val">${esc(fmtDate(effective(r,"loc_upload")))}</span></span></td>`
       + `<td class="calc"><span class="cell"><span class="val">${esc(fmtDate(effective(r,"tasks_start")))}</span></span></td>`
@@ -515,7 +569,10 @@ function renderBudgets(tb,area){
   area.innerHTML=h;
   bindHeader(area, cols, flowRows());
   area.querySelectorAll("[data-chk]").forEach(cb=>cb.onchange=async()=>{ const fid=cb.dataset.chk, cid=cb.dataset.col; state.checks[fid+"::"+cid]=cb.checked; await saveCheck(fid,cid,cb.checked); });
-  area.querySelectorAll("[data-st]").forEach(cb=>cb.onchange=async()=>{ await saveStatus(cb.dataset.st,{[cb.dataset.k]:cb.checked}); });
+  area.querySelectorAll("[data-st]").forEach(cb=>cb.onchange=async()=>{ const fid=cb.dataset.st, k=cb.dataset.k;
+    if(k==="sent_to_loc"){ const cur=state.status[fid]||{sim_reviewed:false,sent_to_loc:false}; state.status[fid]={sim_reviewed:cur.sim_reviewed, sent_to_loc:cb.checked}; await saveSentToLoc(fid, cb.checked); }
+    else { await saveStatus(fid,{[k]:cb.checked}); } });
+  const ll=area.querySelector("[data-loclock]"); if(ll) ll.onclick=(e)=>{ e.stopPropagation(); openLocLockModal(); };
   if(canMng){
     const add=$("addCol"); if(add) add.onclick=()=>openColModal(null);
     const seed=$("seedCols"); if(seed) seed.onclick=seedDefaultCols;
@@ -1082,7 +1139,7 @@ async function startRealtime(){
   if(!sb || _rt) return;
   try{ const { data } = await sb.auth.getSession(); const tok=data&&data.session&&data.session.access_token;
     if(tok && sb.realtime && sb.realtime.setAuth) sb.realtime.setAuth(tok); }catch(e){}
-  const tables=["flow_rows","pending_budget_cols","pending_budget_checks","pending_budget_status","takeoff_changes","tf_plan_names","tf_change_log"];
+  const tables=["flow_rows","pending_budget_cols","pending_budget_checks","pending_budget_status","takeoff_changes","tf_plan_names","tf_change_log","tf_loc_locks"];
   let ch=sb.channel("tf-live");
   tables.forEach(t=>{ ch=ch.on("postgres_changes",{event:"*",schema:"public",table:t},p=>onRemote(t,p)); });
   ch.subscribe(status=>setLive(status)); _rt=ch;
@@ -1108,6 +1165,11 @@ function onRemote(table, p){
     else if(row){ if(row.division!==state.divKey) state.changes=state.changes.filter(x=>x.id!==row.id);
       else { const i=state.changes.findIndex(x=>x.id===row.id); if(i>=0) state.changes[i]=row; else { state.changes.unshift(row); state.changes.sort((a,b)=>(b.req_date||"").localeCompare(a.req_date||"")); } } }
   } else if(table==="tf_plan_names"){ loadPlanNames().then(rtRender); return; }
+  else if(table==="tf_loc_locks"){
+    const r=(ev==="DELETE")?old:row;
+    if(r && r.division===state.divKey){ state.locLock=(ev==="DELETE")?null:((row&&row.assigned_email&&String(row.assigned_email).trim())||null); rtRender(); }
+    return;
+  }
   else if(table==="tf_change_log"){ refreshWhatsNewBadge(); return; }
   rtRender();
 }
