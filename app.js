@@ -1438,16 +1438,21 @@ async function renderPerms(){
       <button class="btn mini" id="pAdd">Save user</button>
     </div>
     <p class="tiny" style="text-align:left;margin:0 0 12px">Divisions apply to <b>editor</b> and <b>purchasing</b> roles. Everyone at ${esc(CFG.ALLOWED_DOMAIN)} is a viewer by default.</p>
+    <input type="text" id="userSearch" placeholder="Search users by email, role, or division…" style="width:100%;margin:0 0 10px">
     <div id="userList"></div>
   </div></div>`;
   p.innerHTML=h;
   $("pAdd").onclick=addUser;
+  const us=$("userSearch"); if(us) us.oninput=drawUsers;
   drawUsers();
 }
 function drawUsers(){
   const list=$("userList"); if(!list) return;
   if(!state.users.length){ list.innerHTML=`<p class="tiny" style="text-align:left;margin:0">No custom roles yet.</p>`; return; }
-  list.innerHTML=state.users.map(u=>`<div class="userrow"><span class="em">${esc(u.email)}</span><span class="role-tag">${esc(u.role)}</span>${(u.divisions||[]).map(d=>`<span class="badge" style="background:var(--navy)">${esc(d)}</span>`).join(" ")}<button class="btn mini danger" data-deluser="${esc(u.email)}">Remove</button></div>`).join("");
+  const q=lc(($("userSearch")&&$("userSearch").value)||"");
+  const rows=q ? state.users.filter(u=>lc(u.email).includes(q)||lc(u.role).includes(q)||(u.divisions||[]).some(d=>lc(d).includes(q))) : state.users;
+  if(!rows.length){ list.innerHTML=`<p class="tiny" style="text-align:left;margin:0">No users match “${esc(q)}”.</p>`; return; }
+  list.innerHTML=rows.map(u=>`<div class="userrow"><span class="em">${esc(u.email)}</span><span class="role-tag">${esc(u.role)}</span>${(u.divisions||[]).map(d=>`<span class="badge" style="background:var(--navy)">${esc(d)}</span>`).join(" ")}<button class="btn mini danger" data-deluser="${esc(u.email)}">Remove</button></div>`).join("");
   list.querySelectorAll("[data-deluser]").forEach(b=>b.onclick=async()=>{ const em=b.dataset.deluser; if(!confirm("Remove role for "+em+"?"))return;
     if(DEMO){ MEM.app_roles=MEM.app_roles.filter(u=>u.email!==em); } else { await sb.from("tf_app_roles").delete().eq("email",em); }
     state.users=state.users.filter(u=>u.email!==em); drawUsers(); });
