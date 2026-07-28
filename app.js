@@ -154,8 +154,39 @@ async function signIn(){
   }finally{ $("signinBtn").disabled=false; $("signinBtn").textContent="Sign in"; }
 }
 
+/* ---- password reset / new-user (admin-generated one-time link) ---- */
+function getRecoverToken(){ const m=(location.hash||"").match(/[#&]recover=([^&]+)/); return m?decodeURIComponent(m[1]):null; }
+function initRecovery(){
+  const tok=getRecoverToken(); if(!tok) return false;
+  window._recovering=true;
+  $("app").classList.add("hidden"); $("auth").classList.remove("hidden");
+  const sub=document.querySelector(".auth-sub"); if(sub) sub.textContent="Set a new password for your account.";
+  $("stepSignin").classList.add("hidden"); $("stepRecover").classList.remove("hidden");
+  $("setPassBtn").addEventListener("click",()=>redeemReset(tok));
+  $("newPass2").addEventListener("keydown",e=>{ if(e.key==="Enter") redeemReset(tok); });
+  return true;
+}
+async function redeemReset(tok){
+  const p1=$("newPass").value, p2=$("newPass2").value; clearAuth();
+  if(!p1 || p1.length<8) return authMsg("Password must be at least 8 characters.","err");
+  if(p1!==p2) return authMsg("Passwords don't match.","err");
+  if(DEMO) return authMsg("Password reset is disabled in demo mode.","err");
+  $("setPassBtn").disabled=true; $("setPassBtn").textContent="Saving…";
+  try{
+    const { data, error }=await sb.rpc("redeem_reset_token",{ p_token:tok, p_new_password:p1 });
+    if(error) throw error;
+    if(!data || !data.ok) throw new Error((data&&data.error)||"Could not set your password.");
+    $("stepRecover").classList.add("hidden");
+    const sub=document.querySelector(".auth-sub"); if(sub) sub.textContent="Your password has been set. You can now sign in.";
+    authMsg("Password updated — taking you to sign in…","ok");
+    setTimeout(()=>{ location.hash=""; location.reload(); },1600);
+  }catch(e){ authMsg((e&&e.message)||"Could not set your password.","err"); }
+  finally{ $("setPassBtn").disabled=false; $("setPassBtn").textContent="Set password"; }
+}
+
 let _entered=false;
 async function onSignedIn(email){
+  if(window._recovering) return;                       // don't boot the app while setting a new password
   if(_entered) return; _entered=true;                 // guard against double-boot (signIn + onAuthStateChange)
   state.email=lc(email);
   // resolve role: Supabase tf_app_roles is authoritative; config is the fallback/seed
@@ -1111,6 +1142,7 @@ function showAdmin(){
   if(!sel.value && sel.options.length) sel.value=sel.options[0].value;
   bindImport();
   renderPerms();
+  renderResetLinks();
 }
 function bindImport(){
   const tile=$("tileStarts"), input=$("startsInput");
@@ -1431,6 +1463,47 @@ async function addUser(){
   $("pEmail").value=""; document.querySelectorAll(".pdiv:checked").forEach(c=>c.checked=false);
   adminMsg("Saved "+email+" as "+role+".","ok"); drawUsers();
 }
+/* Add user / reset password — generates a one-time link (admin only). Relies on the
+   shared Supabase RPCs admin_add_or_reset() and redeem_reset_token(). No email is sent. */
+function renderResetLinks(){
+  const p=$("resetPanel"); if(!p) return;
+  if(!isAdmin()){ p.classList.add("hidden"); return; }
+  p.classList.remove("hidden");
+  p.innerHTML=`<div class="panel"><div class="panel-h">Add user / reset password</div>
+    <div style="padding:16px">
+      <p class="tiny" style="text-align:left;margin:0 0 12px">Enter any ${esc(CFG.ALLOWED_DOMAIN)} email. If it's a new person, the account is created automatically. Either way you get a one-time link (valid 24 hours) for them to set their own password — copy it and send it directly. No email is sent.</p>
+      <div class="permform">
+        <input type="email" id="resetEmail" placeholder="user@lennar.com">
+        <button class="btn mini" id="resetGen">Generate link</button>
+      </div>
+      <div id="resetMsg" class="msg"></div>
+      <div id="resetOut" class="hidden" style="margin-top:10px">
+        <div class="linkrow"><input type="text" id="resetLink" readonly><button class="btn mini ghost" id="resetCopy">Copy</button></div>
+      </div>
+    </div></div>`;
+  $("resetGen").onclick=genResetLink;
+  $("resetEmail").addEventListener("keydown",e=>{ if(e.key==="Enter") genResetLink(); });
+  $("resetCopy").onclick=()=>{ const i=$("resetLink"); i.select(); i.setSelectionRange(0,99999);
+    if(navigator.clipboard) navigator.clipboard.writeText(i.value); else document.execCommand("copy");
+    const b=$("resetCopy"); b.textContent="Copied"; setTimeout(()=>b.textContent="Copy",1500); };
+}
+function resetMsg(t,k){ const m=$("resetMsg"); if(m){ m.className="msg "+(k||"info"); m.textContent=t; } }
+async function genResetLink(){
+  const email=lc($("resetEmail").value); resetMsg("");
+  $("resetOut").classList.add("hidden");
+  if(!email || !email.endsWith(CFG.ALLOWED_DOMAIN)) return resetMsg("Enter a valid "+CFG.ALLOWED_DOMAIN+" email.","err");
+  if(DEMO) return resetMsg("Reset links are disabled in demo mode.","err");
+  $("resetGen").disabled=true; $("resetGen").textContent="Generating…";
+  try{
+    const { data, error }=await sb.rpc("admin_add_or_reset",{ target_email:email });
+    if(error) throw error;
+    const token=data&&data.token; if(!token) throw new Error("No link was returned.");
+    const url=location.origin+location.pathname+"#recover="+encodeURIComponent(token);
+    $("resetLink").value=url; $("resetOut").classList.remove("hidden");
+    resetMsg((data.created?"New account created for ":"Reset link ready for ")+email+" — copy the link and send it. It expires in 24 hours.","ok");
+  }catch(e){ resetMsg(prettyErr(e,"Could not generate a link."),"err"); }
+  finally{ $("resetGen").disabled=false; $("resetGen").textContent="Generate link"; }
+}
 
 /* ---------------- DEMO seed ----------------
    In demo mode we load the real Orlando FLOW OF TAKEOFFS export (data/flow_orlando.json,
@@ -1464,4 +1537,4 @@ async function ensureSeed(){
 }
 
 /* ---------------- start ---------------- */
-tryRestore();
+if(!initRecovery()) tryRestore();

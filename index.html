@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Lennar Takeoff Flow</title>
 <link rel="icon" href="logo.svg">
-<link rel="stylesheet" href="styles.css?v=50">
+<link rel="stylesheet" href="styles.css?v=51">
 </head>
 <body>
 
@@ -21,6 +21,13 @@
       <label class="fld" for="password" style="margin-top:12px">Password</label>
       <input type="password" id="password" placeholder="Your password" autocomplete="current-password">
       <button class="btn" id="signinBtn" style="margin-top:14px">Sign in</button>
+    </div>
+    <div id="stepRecover" class="hidden">
+      <label class="fld" for="newPass">New password</label>
+      <input type="password" id="newPass" placeholder="At least 8 characters" autocomplete="new-password">
+      <label class="fld" for="newPass2" style="margin-top:12px">Confirm password</label>
+      <input type="password" id="newPass2" placeholder="Re-enter password" autocomplete="new-password">
+      <button class="btn" id="setPassBtn" style="margin-top:14px">Set password</button>
     </div>
     <div id="authMsg" class="msg"></div>
     <p class="tiny">Access limited to Lennar associates. Need access or a password reset? Contact the portal admin.</p>
@@ -97,6 +104,7 @@
         </div>
         <div class="admin-side">
           <div id="permsPanel"></div>
+          <div id="resetPanel" class="hidden"></div>
         </div>
       </div>
     </section>
@@ -114,7 +122,7 @@
 <!-- All data (flow rows, budgets, checkboxes, changes, plan-name lookup) is served.
      from Supabase — nothing operational is bundled in this repo. The data/*.js and
      seed_*.sql files are git-ignored (used locally to generate the one-time seed SQL). -->
-<script src="config.js?v=50"></script>
-<script src="app.js?v=50"></script>
+<script src="config.js?v=51"></script>
+<script src="app.js?v=51"></script>
 </body>
 </html>

@@ -325,6 +325,10 @@ table.grid tbody td.handle-td{ overflow:visible!important; position:relative; }
 [data-theme="dark"] table.grid tbody td .cell.fill-preview{ background:#0f2942; box-shadow:inset 0 0 0 1px #24405e; }
 [data-theme="dark"] .fill-handle{ border-color:#0c1929; }
 
+/* ---------- Admin reset-link row ---------- */
+.linkrow{display:flex;align-items:center;gap:8px}
+.linkrow input{flex:1;min-width:0;font-size:13px}
+
 /* ---------- Live-status indicator ---------- */
 .live-dot{ font-size:11.5px; color:var(--muted); display:inline-flex; align-items:center; gap:6px; }
 .live-dot::before{ content:""; width:8px; height:8px; border-radius:50%; background:#c0c8d2; }
