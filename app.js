@@ -123,10 +123,10 @@ function authMsg(t,k){ const m=$("authMsg"); m.className="msg "+(k||"info"); m.t
 function clearAuth(){ const m=$("authMsg"); m.className="msg"; m.textContent=""; }
 function prettyErr(e, fallback){
   console.error("Auth error:", e);
-  let msg=(e && (e.message||e.error_description||e.msg))||"";
-  if(!msg || msg==="{}" || msg==="[object Object]") return fallback+" (Check Supabase SMTP + email templates — see SETUP.md.)";
-  if(/not authorized|sending|smtp|confirmation email/i.test(msg)) msg+=" (Check the SMTP settings + verified sender in Supabase.)";
-  return msg;
+  // Takeoff Flow no longer sends any email — surface the real server/DB error instead of
+  // the old OTP-era "check SMTP" boilerplate, which misreported non-email failures.
+  const msg=(e && (e.message||e.error_description||e.msg||e.hint||e.details))||"";
+  return (msg && msg!=="{}" && msg!=="[object Object]") ? msg : fallback;
 }
 if(DEMO){ $("demoPill").classList.remove("hidden"); }
 
@@ -1500,7 +1500,7 @@ async function genResetLink(){
   if(DEMO) return resetMsg("Reset links are disabled in demo mode.","err");
   $("resetGen").disabled=true; $("resetGen").textContent="Generating…";
   try{
-    const { data, error }=await sb.rpc("admin_add_or_reset",{ target_email:email });
+    const { data, error }=await sb.rpc("tf_admin_add_or_reset",{ target_email:email });   // authorizes via tf_app_roles (Takeoff Flow's own admins)
     if(error) throw error;
     const token=data&&data.token; if(!token) throw new Error("No link was returned.");
     const url=location.origin+location.pathname+"#recover="+encodeURIComponent(token);
