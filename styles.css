@@ -332,6 +332,8 @@ table.grid tbody td.handle-td{ overflow:visible!important; position:relative; }
 .linkrow input{flex:1;min-width:0;font-size:13px}
 
 /* ---------- Access & permissions table ---------- */
+.modal-body select{width:100%;padding:12px 14px;border:1.5px solid var(--line);border-radius:10px;font-size:15px;background:var(--card);color:var(--ink);outline:none}
+[data-theme="dark"] .modal-body select{background:var(--card);color:var(--ink)}
 .permsearch{width:100%;font-size:13px;margin:0 0 10px}
 .pn-toolbar{display:flex;align-items:center;gap:8px;margin:0 0 10px}
 .pn-toolbar .permsearch{flex:1;margin:0;height:40px}

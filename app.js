@@ -600,9 +600,25 @@ function budgetCols(){
   return list;
 }
 /* modal editor for a Pending-Budgets person column (no browser prompts) */
-function openColModal(col){
+/* Purchasing users who cover a division (role=purchasing and the division is in their
+   list, or they have no division limit). Uses an RPC because RLS otherwise hides other
+   people's role rows from non-admins. */
+async function loadPurchasingUsers(div){
+  if(DEMO){ return (MEM.app_roles||[]).filter(u=>u.role==="purchasing" && (!(u.divisions&&u.divisions.length)||u.divisions.includes(div))).map(u=>u.email); }
+  try{ const { data, error }=await sb.rpc("tf_purchasing_users",{ p_division:div }); if(error) throw error; return (data||[]).map(u=>u.email); }
+  catch(e){ console.warn("tf_purchasing_users failed",e);
+    return (state.users||[]).filter(u=>u.role==="purchasing" && (!(u.divisions&&u.divisions.length)||u.divisions.includes(div))).map(u=>u.email);
+  }
+}
+async function openColModal(col){
   const isNew=!col;
   document.querySelectorAll(".modal-ov").forEach(m=>m.remove());
+  const curEmail=(col&&col.assigned_email)?lc(col.assigned_email):"";
+  let emails=[]; try{ emails=(await loadPurchasingUsers(state.divKey)).map(lc); }catch(e){}
+  emails=[...new Set(emails)];
+  if(curEmail && !emails.includes(curEmail)) emails.unshift(curEmail);   // keep a current assignee even if no longer purchasing
+  const divLabel=(CFG.DIVISIONS.find(d=>d.key===state.divKey)||{}).label||state.divKey;
+  const optionsHtml=`<option value="">— Unassigned (editors only) —</option>`+emails.map(e=>`<option value="${esc(e)}"${e===curEmail?" selected":""}>${esc(e)}</option>`).join("");
   const ov=document.createElement("div"); ov.className="modal-ov";
   ov.innerHTML=`<div class="modal-card" style="max-width:440px">
     <div class="modal-h">${isNew?"Add Cost Manager":"Edit column"}<button class="linkbtn" data-x aria-label="Close">&times;</button></div>
@@ -610,9 +626,9 @@ function openColModal(col){
       <label class="fld" for="mcName">Display name</label>
       <input type="text" id="mcName" value="${esc(col?col.name:"")}" placeholder="e.g. Jennifer">
       <label class="fld" for="mcEmail" style="margin-top:14px">Assigned user
-        <span style="font-weight:400;color:var(--muted)">— only this purchasing user can tick this column (leave blank for editors only)</span></label>
-      <input type="email" id="mcEmail" value="${esc(col&&col.assigned_email?col.assigned_email:"")}" placeholder="name@lennar.com">
-      ${state.users&&state.users.length?`<datalist id="mcUsers">${state.users.map(u=>`<option value="${esc(u.email)}">`).join("")}</datalist>`:""}
+        <span style="font-weight:400;color:var(--muted)">— only this purchasing user can tick this column (leave unassigned for editors only)</span></label>
+      <select id="mcEmail">${optionsHtml}</select>
+      ${emails.length?"":`<p class="tiny" style="text-align:left;margin:6px 0 0;color:var(--muted)">No purchasing users cover ${esc(divLabel)} yet — add them in Admin &rsaquo; Access &amp; permissions.</p>`}
       <div id="mcMsg" class="msg"></div>
       <div class="modal-actions">
         <button class="btn" id="mcSave">${isNew?"Add column":"Save changes"}</button>
@@ -621,7 +637,7 @@ function openColModal(col){
       </div>
     </div></div>`;
   document.body.appendChild(ov);
-  const emailInp=ov.querySelector("#mcEmail"); if(state.users&&state.users.length) emailInp.setAttribute("list","mcUsers");
+  const emailInp=ov.querySelector("#mcEmail");
   const close=()=>ov.remove();
   const mcmsg=t=>{ const m=ov.querySelector("#mcMsg"); m.className="msg err"; m.textContent=t; };
   ov.addEventListener("click",e=>{ if(e.target===ov) close(); });
