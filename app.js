@@ -118,12 +118,12 @@ function canToggleCheck(col){
   return state.role==="purchasing" && lc(col.assigned_email)===lc(state.email);
 }
 /* Sent-to-LOC: editors/admins always; if the column is locked to a user, only that
-   user; if unlocked, anyone at the domain may check it. */
+   user; if unlocked, anyone except a viewer may check it. */
 function canToggleSentToLoc(){
   if(canEditDiv(state.divKey)) return true;
   const a=state.locLock;
-  if(!a) return true;                    // unlocked → anyone
-  return lc(a)===lc(state.email);        // locked → the assigned user only
+  if(a) return lc(a)===lc(state.email);  // locked → the assigned user only
+  return state.role!=="viewer";          // unlocked → anyone but a viewer
 }
 
 /* ---------------- auth ---------------- */
@@ -537,7 +537,7 @@ function renderBudgets(tb,area){
       extra=canMng?`<span class="colhead-tools"><button data-editcol="${c.id}" title="Edit column">&#9998;</button><button data-delcol="${c.id}" title="Remove column">&times;</button></span>`
                   :(c.assigned_email?"":`<span class="colhead-flag">unassigned</span>`); }
     if(col.f==="sent"){ const a=state.locLock;
-      title=a?` title="Locked to ${esc(a)} — only they (and editors) can check it"`:` title="Unlocked — anyone can check it"`;
+      title=a?` title="Locked to ${esc(a)} — only they (and editors) can check it"`:` title="Unlocked — anyone except viewers can check it"`;
       extra=canMng?`<span class="colhead-tools"><button data-loclock title="${a?"Locked to "+esc(a)+" — click to change":"Lock to a user"}">${a?"&#128274;":"&#128275;"}</button></span>`
                   :(a?`<span class="colhead-flag">${esc(a.split("@")[0])}</span>`:""); }
     h+=`<th${title} class="${col.cls||""} sorth" data-sort="${col.f}">${esc(col.h)}${col.calc?'<span class="calc-badge">auto</span>':""}<span class="sort-ind">${ind}</span>${extra}</th>`;
@@ -600,25 +600,27 @@ function budgetCols(){
   return list;
 }
 /* modal editor for a Pending-Budgets person column (no browser prompts) */
-/* Purchasing users who cover a division (role=purchasing and the division is in their
-   list, or they have no division limit). Uses an RPC because RLS otherwise hides other
-   people's role rows from non-admins. */
-async function loadPurchasingUsers(div){
-  if(DEMO){ return (MEM.app_roles||[]).filter(u=>u.role==="purchasing" && (!(u.divisions&&u.divisions.length)||u.divisions.includes(div))).map(u=>u.email); }
-  try{ const { data, error }=await sb.rpc("tf_purchasing_users",{ p_division:div }); if(error) throw error; return (data||[]).map(u=>u.email); }
-  catch(e){ console.warn("tf_purchasing_users failed",e);
-    return (state.users||[]).filter(u=>u.role==="purchasing" && (!(u.divisions&&u.divisions.length)||u.divisions.includes(div))).map(u=>u.email);
+/* Users who can be assigned a cost-manager column for a division: purchasing, editors,
+   and admins that cover it. Uses an RPC because RLS otherwise hides other people's role
+   rows from non-admins. Returns [{email, role}]. */
+async function loadAssignableUsers(div){
+  const match=u=> u.role==="admin" || (["editor","purchasing"].includes(u.role) && (!(u.divisions&&u.divisions.length)||u.divisions.includes(div)));
+  if(DEMO){ return (MEM.app_roles||[]).filter(match).map(u=>({email:u.email, role:u.role})); }
+  try{ const { data, error }=await sb.rpc("tf_assignable_users",{ p_division:div }); if(error) throw error; return (data||[]).map(u=>({email:u.email, role:u.role})); }
+  catch(e){ console.warn("tf_assignable_users failed",e);
+    return (state.users||[]).filter(match).map(u=>({email:u.email, role:u.role}));
   }
 }
 async function openColModal(col){
   const isNew=!col;
   document.querySelectorAll(".modal-ov").forEach(m=>m.remove());
   const curEmail=(col&&col.assigned_email)?lc(col.assigned_email):"";
-  let emails=[]; try{ emails=(await loadPurchasingUsers(state.divKey)).map(lc); }catch(e){}
-  emails=[...new Set(emails)];
-  if(curEmail && !emails.includes(curEmail)) emails.unshift(curEmail);   // keep a current assignee even if no longer purchasing
+  let people=[]; try{ people=await loadAssignableUsers(state.divKey); }catch(e){}
+  const seen=new Set(), rows=[];
+  people.forEach(p=>{ const e=lc(p.email); if(e && !seen.has(e)){ seen.add(e); rows.push({email:e, role:p.role}); } });
+  if(curEmail && !seen.has(curEmail)) rows.unshift({email:curEmail, role:""});   // keep a current assignee even if their role changed
   const divLabel=(CFG.DIVISIONS.find(d=>d.key===state.divKey)||{}).label||state.divKey;
-  const optionsHtml=`<option value="">— Unassigned (editors only) —</option>`+emails.map(e=>`<option value="${esc(e)}"${e===curEmail?" selected":""}>${esc(e)}</option>`).join("");
+  const optionsHtml=`<option value="">— Unassigned (editors only) —</option>`+rows.map(r=>`<option value="${esc(r.email)}"${r.email===curEmail?" selected":""}>${esc(r.email)}${r.role?` (${esc(r.role)})`:""}</option>`).join("");
   const ov=document.createElement("div"); ov.className="modal-ov";
   ov.innerHTML=`<div class="modal-card" style="max-width:440px">
     <div class="modal-h">${isNew?"Add Cost Manager":"Edit column"}<button class="linkbtn" data-x aria-label="Close">&times;</button></div>
@@ -628,7 +630,7 @@ async function openColModal(col){
       <label class="fld" for="mcEmail" style="margin-top:14px">Assigned user
         <span style="font-weight:400;color:var(--muted)">— only this purchasing user can tick this column (leave unassigned for editors only)</span></label>
       <select id="mcEmail">${optionsHtml}</select>
-      ${emails.length?"":`<p class="tiny" style="text-align:left;margin:6px 0 0;color:var(--muted)">No purchasing users cover ${esc(divLabel)} yet — add them in Admin &rsaquo; Access &amp; permissions.</p>`}
+      ${rows.length?"":`<p class="tiny" style="text-align:left;margin:6px 0 0;color:var(--muted)">No purchasing, editor, or admin users cover ${esc(divLabel)} yet — add them in Admin &rsaquo; Access &amp; permissions.</p>`}
       <div id="mcMsg" class="msg"></div>
       <div class="modal-actions">
         <button class="btn" id="mcSave">${isNew?"Add column":"Save changes"}</button>
@@ -1032,7 +1034,7 @@ function moveActive(dir, extend){
 }
 function editActive(prefill){
   const cell=sheet.anchor?shCell(sheet.container,sheet.anchor.r,sheet.anchor.c):null; if(!cell) return;
-  if(cell.matches(".longcell")){ if(cell.matches(".editallowed")) openTextModal(cell, sheet.commit); return; }
+  if(cell.matches(".longcell")){ openTextModal(cell, sheet.commit); return; }   // always open (read-only for viewers; editable if allowed)
   if(!cell.matches(".editable")) return;
   startEdit(cell, sheet.commit, dir=>{ if(dir) moveActive(dir,false); else paintSelection(); }, prefill);
 }
