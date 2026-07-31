@@ -424,6 +424,7 @@ function render(){
   else if(state.view==="todo")    renderTodo(tb,area);
   area.querySelectorAll(".grid-wrap").forEach((el,i)=>{ if(sc[i]){ el.scrollLeft=sc[i][0]; el.scrollTop=sc[i][1]; } });
   tb.querySelectorAll("[data-export]").forEach(b=>b.onclick=exportCSV);
+  tb.querySelectorAll("[data-clearfilters]").forEach(b=>{ b.onclick=clearViewFilters; b.disabled=!anyFilters(); });
   savePrefs();   // remember division, tab, sorts, and column filters for next visit
 }
 function matchFilter(str){ return !state.filter || lc(str).includes(state.filter); }
@@ -458,6 +459,7 @@ function renderFlow(tb,area){
     + (canEd?`<button class="btn mini" id="addFlow">+ Add row</button>
        <button class="btn mini ghost" id="undoFlowBtn" title="Nothing to undo">&#8630; Undo</button>
        <button class="btn mini ghost" id="importBtn">Import Start Schedule…</button>`:"")
+    + `<button class="btn mini ghost" data-clearfilters>Clear filters</button>`
     + `<button class="btn mini ghost" data-export>&#8681; Export CSV</button>`
     + `<span class="grow"></span>`
     + `<span class="section-note" style="margin:0">Works like Excel: click to select, drag or Shift-click for a range; double-click, Enter, or just type to edit; Ctrl+D fill down, Ctrl+R fill right, Ctrl+C/Ctrl+V copy/paste, Delete to clear, or drag the corner handle. Blue columns auto-calculate.</span>`;
@@ -519,6 +521,7 @@ function renderBudgets(tb,area){
   const canMng=canManageCols(state.divKey), canEd=canEditDiv(state.divKey);
   tb.innerHTML=`<span class="count">${flowRows().length} row(s) · ${state.cols.length} cost managers(s)</span>`
     + (canMng?`<button class="btn mini" id="addCol">+Cost Manager</button>`:"")
+    + `<button class="btn mini ghost" data-clearfilters>Clear filters</button>`
     + `<button class="btn mini ghost" data-export>&#8681; Export CSV</button>`
     + `<span class="grow"></span>`
     + `<span class="section-note" style="margin:0">Rows mirror Flow of Takeoffs. ${state.role==="purchasing"?"You can tick the column(s) assigned to you.":""}</span>`;
@@ -696,6 +699,7 @@ function renderChanges(tb,area){
   const pending=rows.filter(r=>!r.complete).length;
   tb.innerHTML=`<span class="count">${pending} pending change requests</span>`
     + (canAdd?`<button class="btn mini" id="addChg">+ Add change request</button>`:"")
+    + `<button class="btn mini ghost" data-clearfilters>Clear filters</button>`
     + `<button class="btn mini ghost" data-export>&#8681; Export CSV</button>`
     + `<span class="grow"></span>`;
   let h=`<div class="grid-wrap"><table class="grid"><thead>${theadHTML(cols,true)}</thead><tbody>`;
@@ -769,6 +773,7 @@ function renderTodo(tb,area){
   const base=todoOutstanding().filter(r=>matchFilter([r.community_name,r.community_num,r.plan,r.elevation].join(" ")));
   const rows=sortView(passFilters(base,cols),cols);
   tb.innerHTML=`<span class="count">${rows.length} outstanding</span>`
+    + `<button class="btn mini ghost" data-clearfilters>Clear filters</button>`
     + `<button class="btn mini ghost" data-export>&#8681; Export CSV</button>`
     + `<span class="grow"></span>`
     + `<span class="section-note" style="margin:0">Plan/elevations from Flow of Takeoffs that are <b>not yet completed</b> (no Released date). Fill in Released on the Flow tab and the item clears itself.</span>`;
@@ -814,6 +819,20 @@ function passFilters(rows, cols){
   if(!active.length) return rows;
   return rows.filter(r=>active.every(c=>{ const fv=colFval(c); return cf[c.f].has(fv(r)); }));
 }
+/* rows a column's own filter dropdown should draw its options from: everything the OTHER
+   active filters allow (so options reflect the currently-filtered view, Excel-style). */
+function rowsExcept(rows, cols, exceptField){
+  const cf=colFilterMap();
+  const active=cols.filter(c=>c.f!==exceptField && c.filterable!==false && cf[c.f] instanceof Set && cf[c.f].size);
+  if(!active.length) return rows;
+  return rows.filter(r=>active.every(c=>{ const fv=colFval(c); return cf[c.f].has(fv(r)); }));
+}
+function anyFilters(){ const m=colFilterMap(); return !!state.filter || Object.keys(m).some(k=>m[k] instanceof Set && m[k].size); }
+function clearViewFilters(){
+  state.colFilters[state.view]={};
+  state.filter=""; const gs=$("globalSearch"); if(gs) gs.value="";
+  render();
+}
 function sortView(rows, cols){
   const s=getSort(); if(!s) return rows; const c=cols.find(x=>x.f===s.field); if(!c) return rows;
   const val=c.raw||c.disp||(r=>r[c.f]);
@@ -848,7 +867,7 @@ function theadHTML(cols, hasHandle){
   return h+"</tr>";
 }
 /* ---- multi-select filter dropdown (msel), lazily built on open ---- */
-let _openMsel=null, _openMselSearch="";
+let _openMsel=null, _openMselSearch="", _openMselW=null;
 function visBoxes(w){ return [...w.querySelectorAll(".msel-opt")].filter(o=>o.style.display!=="none").map(o=>o.querySelector("input")); }
 function applyMselSearch(w){ const q=(w.querySelector(".msel-search").value||"").trim().toLowerCase();
   w.querySelectorAll(".msel-opt").forEach(o=>{ o.style.display=(!q||o.textContent.toLowerCase().includes(q))?"":"none"; }); }
@@ -956,15 +975,18 @@ function bindHeader(container, cols, baseRows){
     w.querySelector("[data-mbtn]").addEventListener("click",e=>{ e.stopPropagation();
       const panel=w.querySelector("[data-mpanel]"), wasHidden=panel.classList.contains("hidden");
       document.querySelectorAll(".colmsel [data-mpanel]").forEach(p=>{ if(p!==panel) p.classList.add("hidden"); });
-      if(wasHidden){ buildMselPanel(w,col,baseRows); wireMselPanel(w,col); panel.classList.remove("hidden"); positionMsel(w); _openMsel=col.f; const s=panel.querySelector(".msel-search"); if(s) s.focus(); }
-      else { panel.classList.add("hidden"); _openMsel=null; applyMselIfDirty(); }
+      if(wasHidden){ buildMselPanel(w,col,rowsExcept(baseRows,cols,col.f)); wireMselPanel(w,col); panel.classList.remove("hidden"); positionMsel(w); _openMsel=col.f; _openMselW=w; const s=panel.querySelector(".msel-search"); if(s) s.focus(); }
+      else { panel.classList.add("hidden"); _openMsel=null; _openMselW=null; applyMselIfDirty(); }
     });
   });
-  // close open filter panels when the grid is scrolled (panel is fixed-positioned)
-  container.querySelectorAll(".grid-wrap").forEach(g=>g.addEventListener("scroll",()=>{ if(_openMsel){ document.querySelectorAll(".colmsel [data-mpanel]:not(.hidden)").forEach(p=>p.classList.add("hidden")); _openMsel=null; applyMselIfDirty(); } }));
+  // keep the open panel anchored to its button as the grid scrolls
+  container.querySelectorAll(".grid-wrap").forEach(g=>g.addEventListener("scroll",()=>{ if(_openMselW) positionMsel(_openMselW); }));
 }
 if(!window._mselDocBound){ window._mselDocBound=true;
-  document.addEventListener("click",()=>{ let any=false; document.querySelectorAll(".colmsel [data-mpanel]:not(.hidden)").forEach(p=>{ p.classList.add("hidden"); any=true; }); if(any){ _openMsel=null; applyMselIfDirty(); } });
+  document.addEventListener("click",()=>{ let any=false; document.querySelectorAll(".colmsel [data-mpanel]:not(.hidden)").forEach(p=>{ p.classList.add("hidden"); any=true; }); if(any){ _openMsel=null; _openMselW=null; applyMselIfDirty(); } });
+  // reposition the open filter so it follows its button on any scroll (capture catches inner scrollers too) or resize
+  window.addEventListener("scroll",()=>{ if(_openMselW) positionMsel(_openMselW); }, true);
+  window.addEventListener("resize",()=>{ if(_openMselW) positionMsel(_openMselW); });
 }
 /* build a cols descriptor from a simple {f,h,type,calc} list (Flow / Changes) */
 function descFromCols(list){

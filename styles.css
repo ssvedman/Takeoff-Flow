@@ -105,7 +105,7 @@ table.grid thead tr.filterrow th{position:sticky;top:30px;height:30px;box-sizing
 .msel-search:focus{outline:none;border-color:var(--blue)}
 /* date filter tree (Excel-style month → day accordion) */
 .msel-mhead{display:flex;align-items:center;gap:2px}
-.msel-exp{background:none;border:none;cursor:pointer;color:var(--muted);font-size:10px;line-height:1;width:16px;flex:0 0 auto;padding:4px 2px;border-radius:5px}
+.msel-exp{background:none;border:none;cursor:pointer;color:var(--blue);font-size:15px;line-height:1;width:22px;flex:0 0 auto;padding:3px 2px;border-radius:5px}
 .msel-exp:hover{background:var(--blue-050);color:var(--blue)}
 .msel-mhead .msel-mlabel{flex:1;font-weight:600}
 .msel-count{color:var(--muted);font-weight:400;font-size:11.5px}
