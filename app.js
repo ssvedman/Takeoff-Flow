@@ -586,16 +586,16 @@ function budgetCols(){
     {f:"plan",h:"Plan",disp:r=>r.plan||"",raw:r=>r.plan||""},
     {f:"plan_name",h:"Plan Name",disp:r=>planName(r),raw:r=>planName(r)},
     {f:"elevation",h:"Elev",disp:r=>r.elevation||"",raw:r=>r.elevation||""},
-    {f:"released",h:"Estimating Release",cls:"calc",calc:true,disp:r=>fmtDate(effective(r,"released")),raw:r=>effective(r,"released")||""}
+    {f:"released",h:"Estimating Release",cls:"calc",calc:true,fdate:true,disp:r=>fmtDate(effective(r,"released")),raw:r=>effective(r,"released")||""}
   ];
   state.cols.forEach(c=>list.push({f:"c_"+c.id,h:c.name,person:c,disp:r=>state.checks[r.id+"::"+c.id]?"Yes":"No",raw:r=>state.checks[r.id+"::"+c.id]?1:0}));
   list.push(
     {f:"sim",h:"SIM Reviewed",disp:r=>(state.status[r.id]||{}).sim_reviewed?"Yes":"No",raw:r=>(state.status[r.id]||{}).sim_reviewed?1:0},
     {f:"sent",h:"Sent to LOC",disp:r=>(state.status[r.id]||{}).sent_to_loc?"Yes":"No",raw:r=>(state.status[r.id]||{}).sent_to_loc?1:0},
-    {f:"pricing_due",h:"Pricing Due",cls:"calc",calc:true,disp:r=>fmtDate(workday(r.first_trench_date,-30,true)),raw:r=>workday(r.first_trench_date,-30,true)||""},
-    {f:"loc_upload",h:"LOC Upload",cls:"calc",calc:true,disp:r=>fmtDate(effective(r,"loc_upload")),raw:r=>effective(r,"loc_upload")||""},
-    {f:"tasks_start",h:"Tasks Start",cls:"calc",calc:true,disp:r=>fmtDate(effective(r,"tasks_start")),raw:r=>effective(r,"tasks_start")||""},
-    {f:"trench",h:"Trench Date",cls:"calc",calc:true,disp:r=>fmtDate(r.first_trench_date),raw:r=>r.first_trench_date||""}
+    {f:"pricing_due",h:"Pricing Due",cls:"calc",calc:true,fdate:true,disp:r=>fmtDate(workday(r.first_trench_date,-30,true)),raw:r=>workday(r.first_trench_date,-30,true)||""},
+    {f:"loc_upload",h:"LOC Upload",cls:"calc",calc:true,fdate:true,disp:r=>fmtDate(effective(r,"loc_upload")),raw:r=>effective(r,"loc_upload")||""},
+    {f:"tasks_start",h:"Tasks Start",cls:"calc",calc:true,fdate:true,disp:r=>fmtDate(effective(r,"tasks_start")),raw:r=>effective(r,"tasks_start")||""},
+    {f:"trench",h:"Trench Date",cls:"calc",calc:true,fdate:true,disp:r=>fmtDate(r.first_trench_date),raw:r=>r.first_trench_date||""}
   );
   return list;
 }
@@ -764,7 +764,7 @@ function renderTodo(tb,area){
     {f:"plan",          h:"Plan",     disp:r=>r.plan||"",          raw:r=>r.plan||""},
     {f:"plan_name",     h:"Plan Name",disp:r=>planName(r),          raw:r=>planName(r)},
     {f:"elevation",     h:"Ele",      disp:r=>r.elevation||"",     raw:r=>r.elevation||""},
-    {f:"first_trench_date",h:"Trench",disp:r=>fmtDate(r.first_trench_date),raw:r=>r.first_trench_date||""}
+    {f:"first_trench_date",h:"Trench",fdate:true,disp:r=>fmtDate(r.first_trench_date),raw:r=>r.first_trench_date||""}
   ];
   const base=todoOutstanding().filter(r=>matchFilter([r.community_name,r.community_num,r.plan,r.elevation].join(" ")));
   const rows=sortView(passFilters(base,cols),cols);
@@ -794,11 +794,22 @@ function cmpVal(a,b){
   return String(a).localeCompare(String(b));
 }
 /* colFilters[view][field] = Set of selected display values. Absent/empty Set = no filter (all). */
+/* Date columns filter by MONTH bucket ("YYYY-MM") so you can pick a whole month at once,
+   rather than every distinct day. colFval = the value a filter matches on; colFlabel =
+   how that value reads in the dropdown. */
+const _MON=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+function monthKey(v){ v=(v==null?"":String(v)); const m=v.match(/^(\d{4})-(\d{2})/); return m?m[1]+"-"+m[2]:""; }
+function monthLabel(k){ if(!k) return ""; const p=String(k).split("-"); return (_MON[(+p[1])-1]||p[1])+" "+p[0]; }
+function colFval(col){
+  if(col.fdate) return r=>monthKey(col.raw?col.raw(r):r[col.f]);
+  return col.fval || (r=>{ const v=col.disp?col.disp(r):r[col.f]; return (v==null||v==="")?"":String(v); });
+}
+function colFlabel(col){ if(col.fdate) return monthLabel; return col.flabel || (v=>v); }
 function passFilters(rows, cols){
   const cf=colFilterMap();
   const active=cols.filter(c=>c.filterable!==false && cf[c.f] instanceof Set && cf[c.f].size);
   if(!active.length) return rows;
-  return rows.filter(r=>active.every(c=>{ let v=c.disp?c.disp(r):r[c.f]; v=(v==null||v==="")?"":String(v); return cf[c.f].has(v); }));
+  return rows.filter(r=>active.every(c=>{ const fv=colFval(c); return cf[c.f].has(fv(r)); }));
 }
 function sortView(rows, cols){
   const s=getSort(); if(!s) return rows; const c=cols.find(x=>x.f===s.field); if(!c) return rows;
@@ -806,14 +817,14 @@ function sortView(rows, cols){
   return rows.slice().sort((a,b)=>cmpVal(val(a),val(b))*s.dir);
 }
 function distinctVals(rows, col){
-  const set=new Set();
-  rows.forEach(r=>{ let v=col.disp?col.disp(r):r[col.f]; set.add((v==null||v==="")?"":String(v)); });
+  const f=colFval(col), set=new Set();
+  rows.forEach(r=>set.add(f(r)));
   return [...set].sort(cmpVal);
 }
 function mselLabel(col){
   const sel=colFilterMap()[col.f];
   if(!(sel instanceof Set) || !sel.size) return "All";
-  if(sel.size===1){ const v=[...sel][0]; return v===""?"(blank)":v; }
+  if(sel.size===1){ const v=[...sel][0]; return v===""?"(blank)":(colFlabel(col)(v)||v); }
   return sel.size+" selected";
 }
 function filterCellHTML(col){
@@ -843,7 +854,8 @@ function buildMselPanel(w, col, baseRows){
   const sel=colFilterMap()[col.f];
   let opts=distinctVals(baseRows, col);
   if(opts.includes("")){ opts=opts.filter(v=>v!==""); opts.unshift(""); }   // blanks first for easy access
-  const optHTML=opts.map(v=>{ const on=(!(sel instanceof Set)||sel.has(v))?"checked":""; const lbl=v===""?'<i class="msel-blank">(Blanks)</i>':esc(v);
+  const flabel=colFlabel(col);
+  const optHTML=opts.map(v=>{ const on=(!(sel instanceof Set)||sel.has(v))?"checked":""; const lbl=v===""?'<i class="msel-blank">(Blanks)</i>':esc(flabel(v));
     return `<label class="msel-opt${v===""?" msel-opt-blank":""}"><input type="checkbox" value="${esc(v)}" ${on}>${lbl}</label>`; }).join("");
   panel.innerHTML=`<input type="text" class="msel-search" placeholder="Search…">
     <div class="msel-actions"><button type="button" class="linkbtn" data-mall>Select all</button><button type="button" class="linkbtn" data-mnone>Unselect all</button></div>
@@ -897,7 +909,7 @@ if(!window._mselDocBound){ window._mselDocBound=true;
 /* build a cols descriptor from a simple {f,h,type,calc} list (Flow / Changes) */
 function descFromCols(list){
   return list.map(c=>({
-    f:c.f, h:c.h, cls:(c.calc||c.auto)?"calc":"", calc:c.calc, auto:c.auto,
+    f:c.f, h:c.h, cls:(c.calc||c.auto)?"calc":"", calc:c.calc, auto:c.auto, fdate:c.type==="date",
     raw:r=>{ if(c.get) return c.get(r)||""; if(c.type==="check") return r[c.f]?1:0; const v=c.calc?effective(r,c.f):r[c.f]; return v==null?"":v; },
     disp:r=>{ if(c.get) return c.get(r)||""; if(c.type==="check") return r[c.f]?"Yes":"No"; const v=c.calc?effective(r,c.f):r[c.f]; return c.type==="date"?fmtDate(v):(v==null?"":v); }
   }));
