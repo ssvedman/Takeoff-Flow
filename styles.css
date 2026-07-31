@@ -103,13 +103,17 @@ table.grid thead tr.filterrow th{position:sticky;top:30px;height:30px;box-sizing
 .msel-opt input{accent-color:var(--blue);flex:0 0 auto}
 .msel-search{width:100%;padding:7px 10px;border:1.5px solid var(--line);border-radius:8px;font-size:13px;margin-bottom:6px;background:var(--card);color:var(--ink)}
 .msel-search:focus{outline:none;border-color:var(--blue)}
+/* filter control rows (Select all / Add current selection to filter) */
+.msel-ctl{font-weight:600}
+.msel-addfilter{font-weight:500;color:var(--muted)}
+.msel-sep{height:1px;background:var(--line);margin:4px 2px 5px}
 /* date filter tree (Excel-style month → day accordion) */
-.msel-mhead{display:flex;align-items:center;gap:2px}
-.msel-exp{background:none;border:none;cursor:pointer;color:var(--blue);font-size:15px;line-height:1;width:22px;flex:0 0 auto;padding:3px 2px;border-radius:5px}
+.msel-mhead{display:flex;align-items:center;gap:0}
+.msel-exp{background:none;border:none;cursor:pointer;color:var(--blue);font-size:15px;line-height:1;width:16px;flex:0 0 auto;padding:3px 0;border-radius:5px}
 .msel-exp:hover{background:var(--blue-050);color:var(--blue)}
-.msel-mhead .msel-mlabel{flex:1;font-weight:600}
+.msel-mhead .msel-mlabel{flex:1;font-weight:600;padding-left:0}
 .msel-count{color:var(--muted);font-weight:400;font-size:11.5px}
-.msel-days{padding-left:22px}
+.msel-days{padding-left:26px}
 .msel-days.hidden{display:none}
 table.grid tbody td{padding:0;border-bottom:1px solid var(--line);border-right:1px solid var(--line);white-space:nowrap;vertical-align:middle;height:22px;max-width:360px;overflow:hidden}
 table.grid tbody tr:hover td{background:var(--blue-050)}

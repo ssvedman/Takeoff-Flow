@@ -867,27 +867,25 @@ function theadHTML(cols, hasHandle){
   return h+"</tr>";
 }
 /* ---- multi-select filter dropdown (msel), lazily built on open ---- */
-let _openMsel=null, _openMselSearch="", _openMselW=null;
-function visBoxes(w){ return [...w.querySelectorAll(".msel-opt")].filter(o=>o.style.display!=="none").map(o=>o.querySelector("input")); }
-function applyMselSearch(w){ const q=(w.querySelector(".msel-search").value||"").trim().toLowerCase();
-  w.querySelectorAll(".msel-opt").forEach(o=>{ o.style.display=(!q||o.textContent.toLowerCase().includes(q))?"":"none"; }); }
+let _openMsel=null, _openMselW=null;
+let _mselWork=null, _mselAll=null, _mselCol=null, _mselDirty=false;
+/* Excel-style filter: a working selection Set drives everything. Typing in the search
+   applies live (matches become the selection); "Add current selection to filter" makes a
+   new search ADD its matches to what's already selected instead of replacing. */
 function datePanelHTML(col, baseRows){
-  const sel=colFilterMap()[col.f];
-  const isSel=k=>!(sel instanceof Set)||sel.has(k);
   const keys=distinctVals(baseRows, col);
   const hasBlank=keys.includes("");
   const groups=new Map();
   keys.filter(k=>k!=="").forEach(d=>{ const mk=monthKey(d); if(!groups.has(mk)) groups.set(mk,[]); groups.get(mk).push(d); });
   const months=[...groups.keys()].sort();
   let h="";
-  if(hasBlank) h+=`<label class="msel-opt msel-day msel-opt-blank"><input type="checkbox" class="dchk" value=""${isSel("")?" checked":""}><i class="msel-blank">(Blanks)</i></label>`;
+  if(hasBlank) h+=`<label class="msel-opt msel-day msel-opt-blank"><input type="checkbox" class="vchk dchk" value=""><i class="msel-blank">(Blanks)</i></label>`;
   months.forEach(mk=>{
     const ds=groups.get(mk).slice().sort();
-    const allOn=ds.every(isSel);
     h+=`<div class="msel-month" data-mk="${esc(mk)}">
       <div class="msel-mhead"><button type="button" class="msel-exp" data-exp aria-label="Expand">&#9656;</button>`
-      +`<label class="msel-opt msel-mlabel"><input type="checkbox" class="mchk"${allOn?" checked":""}> ${esc(monthLabel(mk))} <span class="msel-count">(${ds.length})</span></label></div>`
-      +`<div class="msel-days hidden">${ds.map(d=>`<label class="msel-opt msel-day"><input type="checkbox" class="dchk" value="${esc(d)}"${isSel(d)?" checked":""}> ${esc(fmtDate(d))}</label>`).join("")}</div>`
+      +`<label class="msel-opt msel-mlabel"><input type="checkbox" class="mchk"> ${esc(monthLabel(mk))} <span class="msel-count">(${ds.length})</span></label></div>`
+      +`<div class="msel-days hidden">${ds.map(d=>`<label class="msel-opt msel-day"><input type="checkbox" class="vchk dchk" value="${esc(d)}"> ${esc(fmtDate(d))}</label>`).join("")}</div>`
       +`</div>`;
   });
   return h;
@@ -899,69 +897,83 @@ function refreshMonthStates(w){
     mc.indeterminate = on>0 && on<days.length;
   });
 }
-function dateSearch(w,q){
-  q=(q||"").trim().toLowerCase();
-  const blank=w.querySelector(".msel-opt-blank"); if(blank) blank.style.display=(!q||blank.textContent.toLowerCase().includes(q))?"":"none";
-  w.querySelectorAll(".msel-month").forEach(m=>{
-    const mlabel=m.querySelector(".msel-mlabel").textContent.toLowerCase();
-    let any=false;
-    m.querySelectorAll(".msel-days .msel-day").forEach(d=>{ const show=!q||d.textContent.toLowerCase().includes(q)||mlabel.includes(q); d.style.display=show?"":"none"; if(show) any=true; });
-    m.style.display=(!q||mlabel.includes(q)||any)?"":"none";
-    if(q&&any){ m.querySelector(".msel-days").classList.remove("hidden"); const e=m.querySelector("[data-exp]"); if(e) e.innerHTML="&#9662;"; }
-  });
-}
 function buildMselPanel(w, col, baseRows){
   const panel=w.querySelector("[data-mpanel]");
-  if(col.fdate){
-    panel.innerHTML=`<input type="text" class="msel-search" placeholder="Search month or date…">
-      <div class="msel-actions"><button type="button" class="linkbtn" data-mall>Select all</button><button type="button" class="linkbtn" data-mnone>Unselect all</button></div>
-      <div class="msel-list msel-tree">${datePanelHTML(col,baseRows)}</div>`;
-    return;
+  const ctl=`<label class="msel-opt msel-ctl msel-selall"><input type="checkbox" class="msel-allbox"> <span class="msel-alltext">(Select all)</span></label>`
+    +`<label class="msel-opt msel-ctl msel-addfilter hidden"><input type="checkbox" class="msel-addbox"> Add current selection to filter</label>`
+    +`<div class="msel-sep"></div>`;
+  let body;
+  if(col.fdate){ body=datePanelHTML(col,baseRows); }
+  else {
+    let opts=distinctVals(baseRows, col);
+    if(opts.includes("")){ opts=opts.filter(v=>v!==""); opts.unshift(""); }
+    const flabel=colFlabel(col);
+    body=opts.map(v=>{ const lbl=v===""?'<i class="msel-blank">(Blanks)</i>':esc(flabel(v));
+      return `<label class="msel-opt${v===""?" msel-opt-blank":""}"><input type="checkbox" class="vchk" value="${esc(v)}">${lbl}</label>`; }).join("");
   }
-  const sel=colFilterMap()[col.f];
-  let opts=distinctVals(baseRows, col);
-  if(opts.includes("")){ opts=opts.filter(v=>v!==""); opts.unshift(""); }   // blanks first for easy access
-  const flabel=colFlabel(col);
-  const optHTML=opts.map(v=>{ const on=(!(sel instanceof Set)||sel.has(v))?"checked":""; const lbl=v===""?'<i class="msel-blank">(Blanks)</i>':esc(flabel(v));
-    return `<label class="msel-opt${v===""?" msel-opt-blank":""}"><input type="checkbox" value="${esc(v)}" ${on}>${lbl}</label>`; }).join("");
-  panel.innerHTML=`<input type="text" class="msel-search" placeholder="Search…">
-    <div class="msel-actions"><button type="button" class="linkbtn" data-mall>Select all</button><button type="button" class="linkbtn" data-mnone>Unselect all</button></div>
-    <div class="msel-list">${optHTML}</div>`;
+  panel.innerHTML=`<input type="text" class="msel-search" placeholder="${col.fdate?"Search month or date…":"Search…"}">
+    <div class="msel-list${col.fdate?" msel-tree":""}">${ctl}${body}</div>`;
 }
-function wireMselPanel(w, col){
-  const panel=w.querySelector("[data-mpanel]");
-  panel.addEventListener("click",e=>e.stopPropagation());
-  const search=panel.querySelector(".msel-search");
+function mselBoxes(w){ return [...w.querySelectorAll(".vchk")]; }
+function mselVisible(b){ const o=b.closest(".msel-opt"); if(o&&o.style.display==="none") return false; const m=b.closest(".msel-month"); if(m&&m.style.display==="none") return false; return true; }
+function mselSyncBoxes(w){ mselBoxes(w).forEach(b=>b.checked=_mselWork.has(b.value)); if(_mselCol&&_mselCol.fdate) refreshMonthStates(w); }
+function mselSyncMaster(w){
+  const q=(w.querySelector(".msel-search").value||"").trim();
+  const at=w.querySelector(".msel-alltext"); if(at) at.textContent=q?"(Select all search results)":"(Select all)";
+  const af=w.querySelector(".msel-addfilter"); if(af) af.classList.toggle("hidden", !q);
+  const vis=mselBoxes(w).filter(mselVisible), on=vis.filter(b=>b.checked).length, m=w.querySelector(".msel-allbox");
+  if(m){ m.checked=vis.length>0&&on===vis.length; m.indeterminate=on>0&&on<vis.length; }
+}
+function mselApplyVisibility(w,col,q){
   if(col.fdate){
-    refreshMonthStates(w);
-    search.addEventListener("input",()=>dateSearch(w,search.value));
-    panel.querySelectorAll("[data-exp]").forEach(b=>b.addEventListener("click",()=>{ const days=b.closest(".msel-month").querySelector(".msel-days"); const nowHidden=days.classList.toggle("hidden"); b.innerHTML=nowHidden?"&#9656;":"&#9662;"; }));
-    panel.querySelectorAll(".mchk").forEach(mc=>mc.addEventListener("change",()=>{ mc.closest(".msel-month").querySelectorAll(".dchk").forEach(d=>d.checked=mc.checked); mc.indeterminate=false; commitMsel(w,col); }));
-    panel.querySelectorAll(".dchk").forEach(dc=>dc.addEventListener("change",()=>{ refreshMonthStates(w); commitMsel(w,col); }));
-    panel.querySelector("[data-mall]").addEventListener("click",()=>{ panel.querySelectorAll(".dchk").forEach(d=>d.checked=true); refreshMonthStates(w); commitMsel(w,col); });
-    panel.querySelector("[data-mnone]").addEventListener("click",()=>{ panel.querySelectorAll(".dchk").forEach(d=>d.checked=false); refreshMonthStates(w); commitMsel(w,col); });
-    return;
+    const blank=w.querySelector(".msel-opt-blank"); if(blank) blank.style.display=(!q||blank.textContent.toLowerCase().includes(q))?"":"none";
+    w.querySelectorAll(".msel-month").forEach(m=>{ const ml=m.querySelector(".msel-mlabel").textContent.toLowerCase(); let any=false;
+      m.querySelectorAll(".msel-days .msel-day").forEach(d=>{ const show=!q||d.textContent.toLowerCase().includes(q)||ml.includes(q); d.style.display=show?"":"none"; if(show)any=true; });
+      m.style.display=(!q||ml.includes(q)||any)?"":"none";
+      if(q&&any){ m.querySelector(".msel-days").classList.remove("hidden"); const e=m.querySelector("[data-exp]"); if(e) e.innerHTML="&#9662;"; }
+    });
+  } else {
+    w.querySelectorAll(".msel-opt:not(.msel-ctl)").forEach(o=>{ o.style.display=(!q||o.textContent.toLowerCase().includes(q))?"":"none"; });
   }
-  search.addEventListener("input",()=>{ _openMselSearch=search.value; applyMselSearch(w); });
-  panel.querySelector("[data-mall]").addEventListener("click",()=>{ visBoxes(w).forEach(b=>b.checked=true); commitMsel(w,col); });
-  panel.querySelector("[data-mnone]").addEventListener("click",()=>{ visBoxes(w).forEach(b=>b.checked=false); commitMsel(w,col); });
-  panel.querySelectorAll(".msel-list input[type=checkbox]").forEach(b=>b.addEventListener("change",()=>commitMsel(w,col)));
 }
-let _mselDirty=false;
-function applyMselIfDirty(){ if(_mselDirty){ _mselDirty=false; render(); } }
-function commitMsel(w, col){
-  // update the filter state live, but DON'T re-render yet — keep the dropdown open
-  // so multiple boxes can be ticked. Filtering is applied when the panel closes.
-  const boxes=col.fdate
-    ? [...w.querySelectorAll(".dchk")]                                   // date tree: only day checkboxes are values
-    : [...w.querySelectorAll(".msel-list input[type=checkbox]")];
-  const checked=boxes.filter(b=>b.checked).map(b=>b.value);
-  if(checked.length===boxes.length) delete colFilterMap()[col.f];
-  else colFilterMap()[col.f]=new Set(checked);
+function mselSearch(w,col){
+  const q=(w.querySelector(".msel-search").value||"").trim().toLowerCase();
+  const addMode=!!(w.querySelector(".msel-addbox")||{}).checked;
+  mselApplyVisibility(w,col,q);
+  if(q){
+    const matches=mselBoxes(w).filter(mselVisible).map(b=>b.value);
+    if(addMode){ matches.forEach(v=>_mselWork.add(v)); }
+    else { _mselWork=new Set(matches); }
+  }
+  mselSyncBoxes(w); mselSyncMaster(w); mselCommit(w,col);
+}
+function mselCommit(w,col){
+  const covered = _mselAll.length>0 && _mselAll.every(v=>_mselWork.has(v));
+  if(covered || _mselWork.size===0) delete colFilterMap()[col.f];
+  else colFilterMap()[col.f]=new Set([..._mselWork].filter(v=>_mselAll.includes(v)));
   const btn=w.querySelector("[data-mbtn]"); if(btn) btn.textContent=mselLabel(col);
   w.classList.toggle("active", colFilterMap()[col.f] instanceof Set);
   _mselDirty=true;
 }
+function wireMselPanel(w, col){
+  const panel=w.querySelector("[data-mpanel]");
+  panel.addEventListener("click",e=>e.stopPropagation());
+  _mselCol=col; _mselAll=mselBoxes(w).map(b=>b.value);
+  const committed=colFilterMap()[col.f];
+  _mselWork = (committed instanceof Set) ? new Set([...committed]) : new Set(_mselAll);
+  mselSyncBoxes(w); mselSyncMaster(w);
+  panel.querySelector(".msel-search").addEventListener("input",()=>mselSearch(w,col));
+  panel.querySelector(".msel-allbox").addEventListener("change",e=>{ const on=e.target.checked;
+    mselBoxes(w).filter(mselVisible).forEach(b=>{ if(on) _mselWork.add(b.value); else _mselWork.delete(b.value); });
+    mselSyncBoxes(w); mselSyncMaster(w); mselCommit(w,col); });
+  mselBoxes(w).forEach(b=>b.addEventListener("change",()=>{ if(b.checked) _mselWork.add(b.value); else _mselWork.delete(b.value);
+    if(col.fdate) refreshMonthStates(w); mselSyncMaster(w); mselCommit(w,col); }));
+  if(col.fdate){
+    panel.querySelectorAll("[data-exp]").forEach(b=>b.addEventListener("click",()=>{ const days=b.closest(".msel-month").querySelector(".msel-days"); const nowHidden=days.classList.toggle("hidden"); b.innerHTML=nowHidden?"&#9656;":"&#9662;"; }));
+    panel.querySelectorAll(".mchk").forEach(mc=>mc.addEventListener("change",()=>{ mc.closest(".msel-month").querySelectorAll(".dchk").forEach(d=>{ if(mc.checked)_mselWork.add(d.value); else _mselWork.delete(d.value); }); mselSyncBoxes(w); mselSyncMaster(w); mselCommit(w,col); }));
+  }
+}
+function applyMselIfDirty(){ if(_mselDirty){ _mselDirty=false; render(); } }
 function positionMsel(w){
   const panel=w.querySelector("[data-mpanel]"), r=w.querySelector("[data-mbtn]").getBoundingClientRect();
   panel.style.position="fixed"; panel.style.top=(r.bottom+2)+"px";
