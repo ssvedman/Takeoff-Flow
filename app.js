@@ -868,7 +868,7 @@ function theadHTML(cols, hasHandle){
 }
 /* ---- multi-select filter dropdown (msel), lazily built on open ---- */
 let _openMsel=null, _openMselW=null;
-let _mselWork=null, _mselAll=null, _mselCol=null, _mselDirty=false;
+let _mselWork=null, _mselAll=null, _mselCol=null, _mselDirty=false, _mselBase=null;
 /* Excel-style filter: a working selection Set drives everything. Typing in the search
    applies live (matches become the selection); "Add current selection to filter" makes a
    new search ADD its matches to what's already selected instead of replacing. */
@@ -942,8 +942,11 @@ function mselSearch(w,col){
   mselApplyVisibility(w,col,q);
   if(q){
     const matches=mselBoxes(w).filter(mselVisible).map(b=>b.value);
-    if(addMode){ matches.forEach(v=>_mselWork.add(v)); }
-    else { _mselWork=new Set(matches); }
+    // add mode unions the matches onto a fixed base (snapshot), so it's stable per keystroke
+    // instead of piling up every prefix's matches; replace mode just becomes the matches.
+    _mselWork = addMode ? new Set([...(_mselBase||[]), ...matches]) : new Set(matches);
+  } else if(addMode){
+    _mselBase = new Set(_mselWork);   // finished a term — bake it so the next search adds to it
   }
   mselSyncBoxes(w); mselSyncMaster(w); mselCommit(w,col);
 }
@@ -961,8 +964,13 @@ function wireMselPanel(w, col){
   _mselCol=col; _mselAll=mselBoxes(w).map(b=>b.value);
   const committed=colFilterMap()[col.f];
   _mselWork = (committed instanceof Set) ? new Set([...committed]) : new Set(_mselAll);
+  _mselBase = new Set(_mselWork);
   mselSyncBoxes(w); mselSyncMaster(w);
-  panel.querySelector(".msel-search").addEventListener("input",()=>mselSearch(w,col));
+  const searchEl=panel.querySelector(".msel-search");
+  searchEl.addEventListener("input",()=>mselSearch(w,col));
+  searchEl.addEventListener("keydown",e=>{ if(e.key==="Enter"){ e.preventDefault(); panel.classList.add("hidden"); _openMsel=null; _openMselW=null; applyMselIfDirty(); } });
+  const addbox=panel.querySelector(".msel-addbox");
+  if(addbox) addbox.addEventListener("change",()=>{ if(addbox.checked) _mselBase=new Set(_mselWork); });
   panel.querySelector(".msel-allbox").addEventListener("change",e=>{ const on=e.target.checked;
     mselBoxes(w).filter(mselVisible).forEach(b=>{ if(on) _mselWork.add(b.value); else _mselWork.delete(b.value); });
     mselSyncBoxes(w); mselSyncMaster(w); mselCommit(w,col); });
