@@ -1423,16 +1423,22 @@ function parseStartSchedule(wb, div){
       num = commNum(r); plan = S(r["Plan"]); ev = S(r["EV"])||S(r["Elevation"]);
       trench = xlDate(r["ActStart"])||xlDate(r["PrjStart"]);
     } else continue;
-    // plex transform: buildings → "{units}-PLEX", elevation → first letter (matches the Flow grid)
+    // plex transform: buildings → "{units}-PLEX", elevation → first letter (matches the Flow grid).
+    // Keep the real plan (e.g. H009) so the plex row can record which plans make it up.
+    const srcPlan=plan;
     if(bldg){ const cnt=bldgCount[num+"|"+bldg]; if(cnt) plan=cnt+"-PLEX"; if(ev) ev=ev.charAt(0); }
     const name = comm || idName[num] || num;
     if(!num || !plan) continue;
     const key=[num,lc(plan),lc(ev||"")].join("|");   // dedup by community NUMBER (names differ between systems)
-    if(!groups.has(key)) groups.set(key,{ community_name:name, community_num:num, plan, elevation:ev, first_trench_date:trench });
+    if(!groups.has(key)) groups.set(key,{ community_name:name, community_num:num, plan, elevation:ev, first_trench_date:trench, plans:new Set() });
     else{ const g=groups.get(key); if(trench && (!g.first_trench_date || trench<g.first_trench_date)) g.first_trench_date=trench; }
+    if(srcPlan && lc(srcPlan)!==lc(plan)) groups.get(key).plans.add(srcPlan);   // plan collapsed into N-PLEX → remember it
   }
-  return [...groups.values()];
+  const out=[...groups.values()];
+  out.forEach(g=>{ if(g.plans){ if(g.plans.size) g.plan_name=[...g.plans].sort((a,b)=>String(a).localeCompare(String(b),undefined,{numeric:true})).join(", "); delete g.plans; } });
+  return out;
 }
+function mergePlans(a,b){ const s=new Set([...(a?String(a).split(","):[]),...(b?String(b).split(","):[])].map(x=>x.trim()).filter(Boolean)); return [...s].sort((x,y)=>x.localeCompare(y,undefined,{numeric:true})).join(", "); }
 async function buildImportPreview(){
   const div=$("adminDiv").value;
   const isFlow=importState.kind==="flow";
@@ -1467,56 +1473,64 @@ async function buildImportPreview(){
   // Several parsed combos can map to ONE existing row (plex plans collapse to "plex",
   // or an elevation-less start falls back to community+plan). Collapse them per row and
   // keep the EARLIEST date, so each row is updated once (also avoids a duplicate-id upsert).
-  const freshSet=new Set(fresh), earliestByRow=new Map();
+  // aggregate per existing row: earliest trench + the plans that make up a plex (plan_name)
+  const freshSet=new Set(fresh), agg=new Map();
   if(!isFlow) proposed.forEach(p=>{ if(freshSet.has(p)) return; const r=findExisting(p); if(!r) return;
-    const nt=p.first_trench_date; if(!nt) return;
-    const cur=earliestByRow.get(r.id); if(!cur){ earliestByRow.set(r.id,{row:r, earliest:nt}); } else if(nt<cur.earliest){ cur.earliest=nt; } });
-  const moved=[];
-  earliestByRow.forEach(({row:r, earliest})=>{ if(earliest!==(r.first_trench_date||null))
-    moved.push({ id:r.id, community_name:numName[String(r.community_num||"").trim()]||r.community_name, community_num:r.community_num, plan:r.plan, elevation:r.elevation||"", from:r.first_trench_date||"", to:earliest }); });
+    let a=agg.get(r.id); if(!a){ a={row:r, earliest:null, planName:""}; agg.set(r.id,a); }
+    const nt=p.first_trench_date; if(nt && (!a.earliest || nt<a.earliest)) a.earliest=nt;
+    if(p.plan_name) a.planName=mergePlans(a.planName, p.plan_name); });
+  const updates=[];
+  agg.forEach(({row:r, earliest, planName})=>{
+    const trTo=(earliest && earliest!==(r.first_trench_date||null))?earliest:null;
+    const plTo=(planName && planName!==(r.plan_name||""))?planName:null;
+    if(trTo||plTo) updates.push({ id:r.id, community_name:numName[String(r.community_num||"").trim()]||r.community_name, community_num:r.community_num, plan:r.plan, elevation:r.elevation||"", trFrom:r.first_trench_date||"", trTo, plFrom:r.plan_name||"", plTo }); });
   const panel=$("previewPanel"), body=$("previewBody");
   panel.classList.remove("hidden");
   const src=isFlow?"FLOW OF TAKEOFFS workbook":"Starts Log";
-  if(!fresh.length && !moved.length){ body.innerHTML=`<p class="tiny" style="text-align:left">Parsed ${proposed.length} combination(s) from the ${src} — nothing new to add and no trench dates changed in ${esc(div)}.</p>`; return; }
+  if(!fresh.length && !updates.length){ body.innerHTML=`<p class="tiny" style="text-align:left">Parsed ${proposed.length} combination(s) from the ${src} — nothing new to add and nothing changed in ${esc(div)}.</p>`; return; }
   // ---- change summary ----
   const byComm=new Map();
   fresh.forEach(r=>byComm.set(r.community_name,(byComm.get(r.community_name)||0)+1));
   const newComms=[...new Set(fresh.filter(p=>!existingNums.has(String(p.community_num||"").trim())).map(p=>p.community_name))];
-  const sumParts=[]; if(fresh.length) sumParts.push(`${fresh.length} new row(s)`); if(moved.length) sumParts.push(`${moved.length} trench date update(s)`);
+  const trenchN=updates.filter(u=>u.trTo).length, planN=updates.filter(u=>u.plTo).length;
+  const sumParts=[]; if(fresh.length) sumParts.push(`${fresh.length} new row(s)`); if(trenchN) sumParts.push(`${trenchN} trench update(s)`); if(planN) sumParts.push(`${planN} plan-detail update(s)`);
   importState.summary=`Imported ${sumParts.join(" + ")} from ${src} → ${div}${byComm.size?` · ${byComm.size} communities`:""}${newComms.length?`, ${newComms.length} new`:""}`;
   importState.detail={ source:src, division:div, communities:byComm.size, newCommunities:newComms,
     added:fresh.map(r=>({community:r.community_name, plan:r.plan, elevation:r.elevation||"", trench:r.first_trench_date||""})),
-    dateChanges:moved.map(m=>({community:m.community_name, plan:m.plan, elevation:m.elevation, from:m.from, to:m.to})) };
+    dateChanges:updates.filter(u=>u.trTo).map(u=>({community:u.community_name, plan:u.plan, elevation:u.elevation, from:u.trFrom, to:u.trTo})),
+    planChanges:updates.filter(u=>u.plTo).map(u=>({community:u.community_name, plan:u.plan, elevation:u.elevation, from:u.plFrom, to:u.plTo})) };
   const pnMap=(state.planNames&&state.planNames[div])||{};
-  const pnOf=r=>pnMap[String(r.plan==null?"":r.plan).trim().toUpperCase()]||"";
+  const pnOf=r=>r.plan_name || pnMap[String(r.plan==null?"":r.plan).trim().toUpperCase()]||"";
   let h=`<div class="import-summary">
-    <div class="is-row">${fresh.length?`<span class="is-n">${fresh.length}</span> new row(s)`:""}${fresh.length&&moved.length?" &nbsp;·&nbsp; ":""}${moved.length?`<span class="is-n">${moved.length}</span> trench update(s)`:""} for <b>${esc(div)}</b></div>
+    <div class="is-row">${fresh.length?`<span class="is-n">${fresh.length}</span> new row(s)`:""}${fresh.length&&updates.length?" &nbsp;·&nbsp; ":""}${updates.length?`<span class="is-n">${updates.length}</span> row update(s)`:""} for <b>${esc(div)}</b></div>
     <div class="tiny" style="text-align:left;margin:2px 0 0">${proposed.length} parsed · ${proposed.length-fresh.length} already exist${newComms.length?` · <b>${newComms.length} new communities</b>`:""}</div>
     ${newComms.length?`<div class="tiny" style="text-align:left;margin:6px 0 0">New communities: ${newComms.slice(0,12).map(esc).join(", ")}${newComms.length>12?` +${newComms.length-12} more`:""}</div>`:""}
-    <div class="tiny" style="text-align:left;margin:6px 0 0">New rows come in with their earliest trench date. Existing rows are never overwritten, except the First Trench date where the earliest start moved (listed below).</div>
+    <div class="tiny" style="text-align:left;margin:6px 0 0">New rows come in with their earliest trench date. Existing rows are only changed for a moved First Trench date or updated plex plan list (below) — nothing else is overwritten.</div>
   </div>`;
   if(fresh.length){
     h+=`<div class="tiny" style="text-align:left;font-weight:700;margin:10px 0 4px">New rows to add</div>`;
-    h+=`<div class="prev-scroll"><table class="prev-table"><thead><tr><th>Community</th><th>Comm #</th><th>Plan</th><th>Plan Name</th><th>Elevation</th><th>First Trench</th></tr></thead><tbody>`;
+    h+=`<div class="prev-scroll"><table class="prev-table"><thead><tr><th>Community</th><th>Comm #</th><th>Plan</th><th>Plan Name / plans</th><th>Elevation</th><th>First Trench</th></tr></thead><tbody>`;
     fresh.slice(0,200).forEach(r=>h+=`<tr><td>${esc(r.community_name)}${newComms.includes(r.community_name)?' <span class="badge" style="background:var(--good)">new</span>':""}</td><td>${esc(r.community_num||"")}</td><td>${esc(r.plan)}</td><td>${esc(pnOf(r))}</td><td>${esc(r.elevation||"")}</td><td>${esc(fmtDate(r.first_trench_date))}</td></tr>`);
     h+=`</tbody></table></div>`;
     if(fresh.length>200) h+=`<p class="tiny" style="text-align:left">…and ${fresh.length-200} more.</p>`;
   }
-  if(moved.length){
-    h+=`<div class="tiny" style="text-align:left;font-weight:700;margin:12px 0 4px">First Trench date changes (earliest start moved)</div>`;
-    h+=`<div class="prev-scroll"><table class="prev-table"><thead><tr><th>Community</th><th>Comm #</th><th>Plan</th><th>Elevation</th><th>Current</th><th>New (earliest)</th></tr></thead><tbody>`;
-    moved.slice(0,200).forEach(m=>h+=`<tr><td>${esc(m.community_name)}</td><td>${esc(m.community_num||"")}</td><td>${esc(m.plan)}</td><td>${esc(m.elevation||"")}</td><td>${esc(fmtDate(m.from))||'<span class="muted">—</span>'}</td><td><b>${esc(fmtDate(m.to))}</b></td></tr>`);
+  if(updates.length){
+    h+=`<div class="tiny" style="text-align:left;font-weight:700;margin:12px 0 4px">Updates to existing rows</div>`;
+    h+=`<div class="prev-scroll"><table class="prev-table"><thead><tr><th>Community</th><th>Comm #</th><th>Plan</th><th>Elevation</th><th>First Trench</th><th>Plans (plex)</th></tr></thead><tbody>`;
+    updates.slice(0,200).forEach(u=>h+=`<tr><td>${esc(u.community_name)}</td><td>${esc(u.community_num||"")}</td><td>${esc(u.plan)}</td><td>${esc(u.elevation||"")}</td>`
+      +`<td>${u.trTo?`${esc(fmtDate(u.trFrom))||"—"} → <b>${esc(fmtDate(u.trTo))}</b>`:'<span class="muted">—</span>'}</td>`
+      +`<td>${u.plTo?`${esc(u.plFrom)||"—"} → <b>${esc(u.plTo)}</b>`:'<span class="muted">—</span>'}</td></tr>`);
     h+=`</tbody></table></div>`;
-    if(moved.length>200) h+=`<p class="tiny" style="text-align:left">…and ${moved.length-200} more.</p>`;
+    if(updates.length>200) h+=`<p class="tiny" style="text-align:left">…and ${updates.length-200} more.</p>`;
   }
-  const btnLabel=[fresh.length?`add ${fresh.length} row(s)`:"", moved.length?`update ${moved.length} date(s)`:""].filter(Boolean).join(" & ");
+  const btnLabel=[fresh.length?`add ${fresh.length} row(s)`:"", updates.length?`update ${updates.length} row(s)`:""].filter(Boolean).join(" & ");
   h+=`<button class="btn" id="publishImport">Publish — ${btnLabel} to ${esc(div)}</button>`;
   body.innerHTML=h;
-  $("publishImport").onclick=async()=>{ await publishImport(div, fresh, moved, importState.summary, importState.detail); };
+  $("publishImport").onclick=async()=>{ await publishImport(div, fresh, updates, importState.summary, importState.detail); };
 }
 async function existingFlow(div){
   if(DEMO) return MEM.flow_rows.filter(r=>r.division===div);
-  return await sbAll(()=>sb.from("flow_rows").select("id,community_name,community_num,plan,elevation,first_trench_date,sort_order").eq("division",div));
+  return await sbAll(()=>sb.from("flow_rows").select("id,community_name,community_num,plan,elevation,first_trench_date,plan_name,sort_order").eq("division",div));
 }
 /* One request per 500 rows instead of one per row. `op` is "insert" or "upsert". */
 async function sbBulk(op, table, rows, extra){
@@ -1527,7 +1541,7 @@ async function sbBulk(op, table, rows, extra){
     if(error){ console.error(error); throw error; }
   }
 }
-async function publishImport(div, fresh, moved, summary, detail){
+async function publishImport(div, fresh, updates, summary, detail){
   $("publishImport").disabled=true; adminMsg("Publishing…","info");
   try{
     const existRows=await existingFlow(div);
@@ -1536,20 +1550,21 @@ async function publishImport(div, fresh, moved, summary, detail){
     // build all new rows up front
     const newRows=fresh.map(p=>{ const row={ id:uid(), division:div, sort_order:++n, updated_at:now, updated_by:state.email };
       for(const k in p){ if(k!=="id"&&k!=="division"&&k!=="sort_order") row[k]=p[k]; } return row; });
-    // partial upsert for moved dates: id + division (NOT NULL) + the changed field only.
-    // Dedup by id (keep earliest) so the batch never touches the same row twice.
-    const byId=new Map();
-    (moved||[]).forEach(m=>{ const cur=byId.get(m.id); if(!cur || (m.to && m.to<cur.to)) byId.set(m.id, m); });
-    const dateRows=[...byId.values()].map(m=>({ id:m.id, division:div, first_trench_date:m.to, updated_at:now, updated_by:state.email }));
+    // partial upsert for existing-row changes: id + division (NOT NULL) + only the changed
+    // fields (First Trench and/or plex plan list). One row per id so the batch never
+    // touches the same row twice.
+    const byId=new Map(); (updates||[]).forEach(u=>byId.set(u.id,u));
+    const updRows=[...byId.values()].map(u=>{ const row={ id:u.id, division:div, updated_at:now, updated_by:state.email };
+      if(u.trTo) row.first_trench_date=u.trTo; if(u.plTo) row.plan_name=u.plTo; return row; });
     if(DEMO){
       newRows.forEach(r=>MEM.flow_rows.push(r));
-      dateRows.forEach(d=>{ const r=MEM.flow_rows.find(x=>x.id===d.id); if(r) r.first_trench_date=d.first_trench_date; });
+      updRows.forEach(d=>{ const r=MEM.flow_rows.find(x=>x.id===d.id); if(r){ if(d.first_trench_date!==undefined) r.first_trench_date=d.first_trench_date; if(d.plan_name!==undefined) r.plan_name=d.plan_name; } });
     }else{
       if(newRows.length) await sbBulk("insert","flow_rows",newRows);            // one call per 500 new rows
-      if(dateRows.length) await sbBulk("upsert","flow_rows",dateRows,{onConflict:"id"});  // one call per 500 date updates
+      if(updRows.length) await sbBulk("upsert","flow_rows",updRows,{onConflict:"id"});  // one call per 500 row updates
     }
     await logChange(div, summary||`Imported ${fresh.length} row(s) into ${div}`, detail);
-    adminMsg(`Published ${fresh.length} new row(s)${(moved&&moved.length)?` and updated ${moved.length} trench date(s)`:""} in ${div}.`,"ok");
+    adminMsg(`Published ${fresh.length} new row(s)${(updates&&updates.length)?` and updated ${updates.length} existing row(s)`:""} in ${div}.`,"ok");
     $("previewPanel").classList.add("hidden"); $("tileStarts").classList.remove("filled"); $("startsName").textContent="Drop the Starts Log .xlsx here or click to browse";
     if(div===state.divKey){ await loadDivision(div); render(); }   // reload once, not per row
   }catch(e){
@@ -1597,6 +1612,7 @@ async function openWhatsNew(){
       if(d.newCommunities&&d.newCommunities.length) detailHTML+=`<div class="chg-sec"><div class="chg-sec-h">New communities (${d.newCommunities.length})</div><ul class="chg-list">${d.newCommunities.map(c=>`<li class="add-v">${esc(c)}</li>`).join("")}</ul></div>`;
       if(d.added&&d.added.length) detailHTML+=`<div class="chg-sec"><div class="chg-sec-h">Rows added (${d.added.length})</div><ul class="chg-list">${d.added.slice(0,300).map(a=>`<li>${esc(a.community)} — ${esc(a.plan)} ${esc(a.elevation||"")} ${a.trench?`<span class="chg-arrow">trench ${esc(fmtDate(a.trench))}</span>`:""}</li>`).join("")}${d.added.length>300?`<li class="tiny">…and ${d.added.length-300} more</li>`:""}</ul></div>`;
       if(d.dateChanges&&d.dateChanges.length) detailHTML+=`<div class="chg-sec"><div class="chg-sec-h">Trench date updates (${d.dateChanges.length})</div><ul class="chg-list">${d.dateChanges.slice(0,300).map(c=>`<li>${esc(c.community)} — ${esc(c.plan)} ${esc(c.elevation||"")} <span class="chg-arrow">${esc(fmtDate(c.from))||"—"} → ${esc(fmtDate(c.to))}</span></li>`).join("")}${d.dateChanges.length>300?`<li class="tiny">…and ${d.dateChanges.length-300} more</li>`:""}</ul></div>`;
+      if(d.planChanges&&d.planChanges.length) detailHTML+=`<div class="chg-sec"><div class="chg-sec-h">Plex plan updates (${d.planChanges.length})</div><ul class="chg-list">${d.planChanges.slice(0,300).map(c=>`<li>${esc(c.community)} — ${esc(c.plan)} ${esc(c.elevation||"")} <span class="chg-arrow">${esc(c.from)||"—"} → ${esc(c.to)}</span></li>`).join("")}${d.planChanges.length>300?`<li class="tiny">…and ${d.planChanges.length-300} more</li>`:""}</ul></div>`;
       if(d.source) detailHTML+=`<div class="chg-meta">Source: ${esc(d.source)}</div>`;
     }
     const hasDetail=!!detailHTML;
