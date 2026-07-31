@@ -1424,21 +1424,18 @@ function parseStartSchedule(wb, div){
       trench = xlDate(r["ActStart"])||xlDate(r["PrjStart"]);
     } else continue;
     // plex transform: buildings → "{units}-PLEX", elevation → first letter (matches the Flow grid).
-    // Keep the real plan (e.g. H009) so the plex row can record which plans make it up.
-    const srcPlan=plan;
+    const srcPlan=plan;                       // the real plan on this lot (e.g. H009)
     if(bldg){ const cnt=bldgCount[num+"|"+bldg]; if(cnt) plan=cnt+"-PLEX"; if(ev) ev=ev.charAt(0); }
     const name = comm || idName[num] || num;
     if(!num || !plan) continue;
-    const key=[num,lc(plan),lc(ev||"")].join("|");   // dedup by community NUMBER (names differ between systems)
-    if(!groups.has(key)) groups.set(key,{ community_name:name, community_num:num, plan, elevation:ev, first_trench_date:trench, plans:new Set() });
-    else{ const g=groups.get(key); if(trench && (!g.first_trench_date || trench<g.first_trench_date)) g.first_trench_date=trench; }
-    if(srcPlan && lc(srcPlan)!==lc(plan)) groups.get(key).plans.add(srcPlan);   // plan collapsed into N-PLEX → remember it
+    const add=(planLabel, evv)=>{ if(!planLabel) return; const key=[num,lc(planLabel),lc(evv||"")].join("|");
+      if(!groups.has(key)) groups.set(key,{ community_name:name, community_num:num, plan:planLabel, elevation:evv, first_trench_date:trench });
+      else{ const g=groups.get(key); if(trench && (!g.first_trench_date || trench<g.first_trench_date)) g.first_trench_date=trench; } };
+    add(plan, ev);                            // the plex ("{N}-PLEX") line, or a normal home line
+    if(bldg && srcPlan && lc(srcPlan)!==lc(plan)) add(srcPlan, ev);   // ALSO a separate line for each plan in the plex
   }
-  const out=[...groups.values()];
-  out.forEach(g=>{ if(g.plans){ if(g.plans.size) g.plan_name=[...g.plans].sort((a,b)=>String(a).localeCompare(String(b),undefined,{numeric:true})).join(", "); delete g.plans; } });
-  return out;
+  return [...groups.values()];
 }
-function mergePlans(a,b){ const s=new Set([...(a?String(a).split(","):[]),...(b?String(b).split(","):[])].map(x=>x.trim()).filter(Boolean)); return [...s].sort((x,y)=>x.localeCompare(y,undefined,{numeric:true})).join(", "); }
 async function buildImportPreview(){
   const div=$("adminDiv").value;
   const isFlow=importState.kind==="flow";
@@ -1473,17 +1470,14 @@ async function buildImportPreview(){
   // Several parsed combos can map to ONE existing row (plex plans collapse to "plex",
   // or an elevation-less start falls back to community+plan). Collapse them per row and
   // keep the EARLIEST date, so each row is updated once (also avoids a duplicate-id upsert).
-  // aggregate per existing row: earliest trench + the plans that make up a plex (plan_name)
+  // existing rows: update the First Trench date when the earliest start moved (per row, once)
   const freshSet=new Set(fresh), agg=new Map();
   if(!isFlow) proposed.forEach(p=>{ if(freshSet.has(p)) return; const r=findExisting(p); if(!r) return;
-    let a=agg.get(r.id); if(!a){ a={row:r, earliest:null, planName:""}; agg.set(r.id,a); }
-    const nt=p.first_trench_date; if(nt && (!a.earliest || nt<a.earliest)) a.earliest=nt;
-    if(p.plan_name) a.planName=mergePlans(a.planName, p.plan_name); });
+    const nt=p.first_trench_date; if(!nt) return;
+    const cur=agg.get(r.id); if(!cur){ agg.set(r.id,{row:r, earliest:nt}); } else if(nt<cur.earliest){ cur.earliest=nt; } });
   const updates=[];
-  agg.forEach(({row:r, earliest, planName})=>{
-    const trTo=(earliest && earliest!==(r.first_trench_date||null))?earliest:null;
-    const plTo=(planName && planName!==(r.plan_name||""))?planName:null;
-    if(trTo||plTo) updates.push({ id:r.id, community_name:numName[String(r.community_num||"").trim()]||r.community_name, community_num:r.community_num, plan:r.plan, elevation:r.elevation||"", trFrom:r.first_trench_date||"", trTo, plFrom:r.plan_name||"", plTo }); });
+  agg.forEach(({row:r, earliest})=>{ if(earliest!==(r.first_trench_date||null))
+    updates.push({ id:r.id, community_name:numName[String(r.community_num||"").trim()]||r.community_name, community_num:r.community_num, plan:r.plan, elevation:r.elevation||"", trFrom:r.first_trench_date||"", trTo:earliest }); });
   const panel=$("previewPanel"), body=$("previewBody");
   panel.classList.remove("hidden");
   const src=isFlow?"FLOW OF TAKEOFFS workbook":"Starts Log";
@@ -1492,34 +1486,30 @@ async function buildImportPreview(){
   const byComm=new Map();
   fresh.forEach(r=>byComm.set(r.community_name,(byComm.get(r.community_name)||0)+1));
   const newComms=[...new Set(fresh.filter(p=>!existingNums.has(String(p.community_num||"").trim())).map(p=>p.community_name))];
-  const trenchN=updates.filter(u=>u.trTo).length, planN=updates.filter(u=>u.plTo).length;
-  const sumParts=[]; if(fresh.length) sumParts.push(`${fresh.length} new row(s)`); if(trenchN) sumParts.push(`${trenchN} trench update(s)`); if(planN) sumParts.push(`${planN} plan-detail update(s)`);
+  const sumParts=[]; if(fresh.length) sumParts.push(`${fresh.length} new row(s)`); if(updates.length) sumParts.push(`${updates.length} trench update(s)`);
   importState.summary=`Imported ${sumParts.join(" + ")} from ${src} → ${div}${byComm.size?` · ${byComm.size} communities`:""}${newComms.length?`, ${newComms.length} new`:""}`;
   importState.detail={ source:src, division:div, communities:byComm.size, newCommunities:newComms,
     added:fresh.map(r=>({community:r.community_name, plan:r.plan, elevation:r.elevation||"", trench:r.first_trench_date||""})),
-    dateChanges:updates.filter(u=>u.trTo).map(u=>({community:u.community_name, plan:u.plan, elevation:u.elevation, from:u.trFrom, to:u.trTo})),
-    planChanges:updates.filter(u=>u.plTo).map(u=>({community:u.community_name, plan:u.plan, elevation:u.elevation, from:u.plFrom, to:u.plTo})) };
+    dateChanges:updates.map(u=>({community:u.community_name, plan:u.plan, elevation:u.elevation, from:u.trFrom, to:u.trTo})) };
   const pnMap=(state.planNames&&state.planNames[div])||{};
-  const pnOf=r=>r.plan_name || pnMap[String(r.plan==null?"":r.plan).trim().toUpperCase()]||"";
+  const pnOf=r=>pnMap[String(r.plan==null?"":r.plan).trim().toUpperCase()]||"";
   let h=`<div class="import-summary">
-    <div class="is-row">${fresh.length?`<span class="is-n">${fresh.length}</span> new row(s)`:""}${fresh.length&&updates.length?" &nbsp;·&nbsp; ":""}${updates.length?`<span class="is-n">${updates.length}</span> row update(s)`:""} for <b>${esc(div)}</b></div>
+    <div class="is-row">${fresh.length?`<span class="is-n">${fresh.length}</span> new row(s)`:""}${fresh.length&&updates.length?" &nbsp;·&nbsp; ":""}${updates.length?`<span class="is-n">${updates.length}</span> trench update(s)`:""} for <b>${esc(div)}</b></div>
     <div class="tiny" style="text-align:left;margin:2px 0 0">${proposed.length} parsed · ${proposed.length-fresh.length} already exist${newComms.length?` · <b>${newComms.length} new communities</b>`:""}</div>
     ${newComms.length?`<div class="tiny" style="text-align:left;margin:6px 0 0">New communities: ${newComms.slice(0,12).map(esc).join(", ")}${newComms.length>12?` +${newComms.length-12} more`:""}</div>`:""}
-    <div class="tiny" style="text-align:left;margin:6px 0 0">New rows come in with their earliest trench date. Existing rows are only changed for a moved First Trench date or updated plex plan list (below) — nothing else is overwritten.</div>
+    <div class="tiny" style="text-align:left;margin:6px 0 0">Each plex building adds an N-PLEX line <b>plus a line for every plan in it</b> (e.g. H009, N122). Existing rows are only changed when the earliest First Trench date moved (below).</div>
   </div>`;
   if(fresh.length){
     h+=`<div class="tiny" style="text-align:left;font-weight:700;margin:10px 0 4px">New rows to add</div>`;
-    h+=`<div class="prev-scroll"><table class="prev-table"><thead><tr><th>Community</th><th>Comm #</th><th>Plan</th><th>Plan Name / plans</th><th>Elevation</th><th>First Trench</th></tr></thead><tbody>`;
+    h+=`<div class="prev-scroll"><table class="prev-table"><thead><tr><th>Community</th><th>Comm #</th><th>Plan</th><th>Plan Name</th><th>Elevation</th><th>First Trench</th></tr></thead><tbody>`;
     fresh.slice(0,200).forEach(r=>h+=`<tr><td>${esc(r.community_name)}${newComms.includes(r.community_name)?' <span class="badge" style="background:var(--good)">new</span>':""}</td><td>${esc(r.community_num||"")}</td><td>${esc(r.plan)}</td><td>${esc(pnOf(r))}</td><td>${esc(r.elevation||"")}</td><td>${esc(fmtDate(r.first_trench_date))}</td></tr>`);
     h+=`</tbody></table></div>`;
     if(fresh.length>200) h+=`<p class="tiny" style="text-align:left">…and ${fresh.length-200} more.</p>`;
   }
   if(updates.length){
-    h+=`<div class="tiny" style="text-align:left;font-weight:700;margin:12px 0 4px">Updates to existing rows</div>`;
-    h+=`<div class="prev-scroll"><table class="prev-table"><thead><tr><th>Community</th><th>Comm #</th><th>Plan</th><th>Elevation</th><th>First Trench</th><th>Plans (plex)</th></tr></thead><tbody>`;
-    updates.slice(0,200).forEach(u=>h+=`<tr><td>${esc(u.community_name)}</td><td>${esc(u.community_num||"")}</td><td>${esc(u.plan)}</td><td>${esc(u.elevation||"")}</td>`
-      +`<td>${u.trTo?`${esc(fmtDate(u.trFrom))||"—"} → <b>${esc(fmtDate(u.trTo))}</b>`:'<span class="muted">—</span>'}</td>`
-      +`<td>${u.plTo?`${esc(u.plFrom)||"—"} → <b>${esc(u.plTo)}</b>`:'<span class="muted">—</span>'}</td></tr>`);
+    h+=`<div class="tiny" style="text-align:left;font-weight:700;margin:12px 0 4px">First Trench date changes (earliest start moved)</div>`;
+    h+=`<div class="prev-scroll"><table class="prev-table"><thead><tr><th>Community</th><th>Comm #</th><th>Plan</th><th>Elevation</th><th>Current</th><th>New (earliest)</th></tr></thead><tbody>`;
+    updates.slice(0,200).forEach(u=>h+=`<tr><td>${esc(u.community_name)}</td><td>${esc(u.community_num||"")}</td><td>${esc(u.plan)}</td><td>${esc(u.elevation||"")}</td><td>${esc(fmtDate(u.trFrom))||'<span class="muted">—</span>'}</td><td><b>${esc(fmtDate(u.trTo))}</b></td></tr>`);
     h+=`</tbody></table></div>`;
     if(updates.length>200) h+=`<p class="tiny" style="text-align:left">…and ${updates.length-200} more.</p>`;
   }
@@ -1555,7 +1545,7 @@ async function publishImport(div, fresh, updates, summary, detail){
     // touches the same row twice.
     const byId=new Map(); (updates||[]).forEach(u=>byId.set(u.id,u));
     const updRows=[...byId.values()].map(u=>{ const row={ id:u.id, division:div, updated_at:now, updated_by:state.email };
-      if(u.trTo) row.first_trench_date=u.trTo; if(u.plTo) row.plan_name=u.plTo; return row; });
+      if(u.trTo) row.first_trench_date=u.trTo; return row; });
     if(DEMO){
       newRows.forEach(r=>MEM.flow_rows.push(r));
       updRows.forEach(d=>{ const r=MEM.flow_rows.find(x=>x.id===d.id); if(r){ if(d.first_trench_date!==undefined) r.first_trench_date=d.first_trench_date; if(d.plan_name!==undefined) r.plan_name=d.plan_name; } });
