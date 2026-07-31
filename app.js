@@ -1408,8 +1408,12 @@ function parseStartSchedule(wb, div){
   // building ids across communities don't collide.) We deliberately do NOT split by
   // start date: a plex is one structure even when its lots have staggered projected
   // starts, so splitting produced bogus counts like a "1-PLEX" + "6-PLEX" from one 7-plex.
+  // Real townhome/plex buildings are Z-prefixed (ZA07, Z157, Z225…). A single-family
+  // community's "Bldg" is a phase/block code (e.g. "6", "R") spanning many lots and plans —
+  // NOT a building — so it must not trigger the plex transform (that produced "42-PLEX").
+  const isPlexBldg=b=>!!b && /^z/i.test(b);
   const bldgCount={};
-  for(const r of rows){ const b=S(r["Bldg"]); if(b){ const k=commNum(r)+"|"+b; bldgCount[k]=(bldgCount[k]||0)+1; } }
+  for(const r of rows){ const b=S(r["Bldg"]); if(isPlexBldg(b)){ const k=commNum(r)+"|"+b; bldgCount[k]=(bldgCount[k]||0)+1; } }
   const idName={}; const groups=new Map();
   for(const r of rows){
     let comm=null, num="", plan=null, ev=null, trench=null; const bldg=S(r["Bldg"]);
@@ -1424,15 +1428,16 @@ function parseStartSchedule(wb, div){
       trench = xlDate(r["ActStart"])||xlDate(r["PrjStart"]);
     } else continue;
     // plex transform: buildings → "{units}-PLEX", elevation → first letter (matches the Flow grid).
+    const bp=isPlexBldg(bldg);                // only Z-prefixed buildings are plexes
     const srcPlan=plan;                       // the real plan on this lot (e.g. H009)
-    if(bldg){ const cnt=bldgCount[num+"|"+bldg]; if(cnt) plan=cnt+"-PLEX"; if(ev) ev=ev.charAt(0); }
+    if(bp){ const cnt=bldgCount[num+"|"+bldg]; if(cnt) plan=cnt+"-PLEX"; if(ev) ev=ev.charAt(0); }
     const name = comm || idName[num] || num;
     if(!num || !plan) continue;
     const add=(planLabel, evv)=>{ if(!planLabel) return; const key=[num,lc(planLabel),lc(evv||"")].join("|");
       if(!groups.has(key)) groups.set(key,{ community_name:name, community_num:num, plan:planLabel, elevation:evv, first_trench_date:trench });
       else{ const g=groups.get(key); if(trench && (!g.first_trench_date || trench<g.first_trench_date)) g.first_trench_date=trench; } };
     add(plan, ev);                            // the plex ("{N}-PLEX") line, or a normal home line
-    if(bldg && srcPlan && lc(srcPlan)!==lc(plan)) add(srcPlan, ev);   // ALSO a separate line for each plan in the plex
+    if(bp && srcPlan && lc(srcPlan)!==lc(plan)) add(srcPlan, ev);   // ALSO a separate line for each plan in the plex
   }
   return [...groups.values()];
 }
