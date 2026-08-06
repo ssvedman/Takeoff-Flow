@@ -93,7 +93,7 @@ function savePrefs(){
 function applyPrefs(){
   const p=loadPrefs();
   if(p.divKey && CFG.DIVISIONS.some(d=>d.key===p.divKey)) state.divKey=p.divKey;
-  if(["flow","budgets","changes","todo"].includes(p.view)) state.view=p.view;
+  if(["flow","budgets","changes","todo","plans"].includes(p.view)) state.view=p.view;
   if(p.sort && typeof p.sort==="object") state.sort=p.sort;
   if(p.colFilters && typeof p.colFilters==="object"){
     const cf={};
@@ -422,6 +422,7 @@ function render(){
   else if(state.view==="budgets") renderBudgets(tb,area);
   else if(state.view==="changes") renderChanges(tb,area);
   else if(state.view==="todo")    renderTodo(tb,area);
+  else if(state.view==="plans")   renderPlans(tb,area);
   area.querySelectorAll(".grid-wrap").forEach((el,i)=>{ if(sc[i]){ el.scrollLeft=sc[i][0]; el.scrollTop=sc[i][1]; } });
   tb.querySelectorAll("[data-export]").forEach(b=>b.onclick=exportCSV);
   tb.querySelectorAll("[data-clearfilters]").forEach(b=>{ b.onclick=clearViewFilters; b.disabled=!anyFilters(); });
@@ -783,6 +784,50 @@ function renderTodo(tb,area){
   h+=`</tbody></table></div>`;
   area.innerHTML=h;
   bindHeader(area, cols, base);
+}
+
+/* ---------------- TAB 5 · PLANS (cross-reference: communities ↔ plans) ---------------- */
+function renderPlans(tb,area){
+  const mode = state.plansMode || "community";
+  const q = lc(state.filter);
+  const pnm = (planLookup()[state.divKey])||{};
+  const nameOf = pl => pnm[String(pl==null?"":pl).trim().toUpperCase()] || "";
+  const mkBtn=(m,label)=>`<button class="btn mini ${mode===m?"":"ghost"}" data-pmode="${m}">${label}</button>`;
+  let bodyHTML="", count=0;
+  if(mode==="community"){
+    const byComm=new Map();
+    state.flow.forEach(r=>{ const key=(r.community_num||r.community_name); if(!key||!r.plan) return;
+      let e=byComm.get(key); if(!e){ e={name:r.community_name||"", num:r.community_num||"", plans:new Set() }; byComm.set(key,e); } e.plans.add(String(r.plan)); });
+    let list=[...byComm.values()];
+    if(q) list=list.filter(e=>lc(e.name).includes(q)||lc(e.num).includes(q));
+    list.sort((a,b)=>String(a.name).localeCompare(String(b.name)));
+    count=list.length;
+    bodyHTML = list.length ? list.map(e=>{
+      const plans=[...e.plans].sort((a,b)=>a.localeCompare(b,undefined,{numeric:true}));
+      return `<div class="pl-card"><div class="pl-card-h">${esc(e.name)} <span class="pl-sub">${esc(e.num||"")} · ${plans.length} plan${plans.length===1?"":"s"}</span></div>
+        <div class="pl-chips">${plans.map(p=>{ const nm=nameOf(p); return `<span class="chip" ${nm?`title="${esc(nm)}"`:""}>${esc(p)}${nm?` <span class="pl-nm">${esc(nm)}</span>`:""}</span>`; }).join("")}</div></div>`;
+    }).join("") : `<div class="empty">No communities${q?" match your search":""}.</div>`;
+  } else {
+    const byPlan=new Map();
+    state.flow.forEach(r=>{ if(!r.plan) return; const p=String(r.plan);
+      let e=byPlan.get(p); if(!e){ e={plan:p, comms:new Map() }; byPlan.set(p,e); } e.comms.set(r.community_num||r.community_name, r.community_name||r.community_num||""); });
+    let list=[...byPlan.values()];
+    if(q) list=list.filter(e=>lc(e.plan).includes(q)||lc(nameOf(e.plan)).includes(q));
+    list.sort((a,b)=>a.plan.localeCompare(b.plan,undefined,{numeric:true}));
+    count=list.length;
+    bodyHTML = list.length ? list.map(e=>{
+      const comms=[...e.comms.values()].sort((a,b)=>String(a).localeCompare(String(b))); const nm=nameOf(e.plan);
+      return `<div class="pl-card"><div class="pl-card-h">${esc(e.plan)}${nm?` <span class="pl-nm">${esc(nm)}</span>`:""} <span class="pl-sub">${comms.length} communit${comms.length===1?"y":"ies"}</span></div>
+        <div class="pl-chips">${comms.map(c=>`<span class="chip">${esc(c)}</span>`).join("")}</div></div>`;
+    }).join("") : `<div class="empty">No plans${q?" match your search":""}.</div>`;
+  }
+  tb.innerHTML=`<span class="count">${count} ${mode==="community"?"communit"+(count===1?"y":"ies"):"plan"+(count===1?"":"s")}</span>`
+    + mkBtn("community","By community") + mkBtn("plan","By plan")
+    + `<button class="btn mini ghost" data-export>&#8681; Export CSV</button>`
+    + `<span class="grow"></span>`
+    + `<span class="section-note" style="margin:0">${mode==="community"?"Search a community (top bar) to see every plan active in it.":"Search a plan number or name to see every community it's in."} Current division only.</span>`;
+  area.innerHTML=`<div class="pl-list">${bodyHTML}</div>`;
+  tb.querySelectorAll("[data-pmode]").forEach(b=>b.onclick=()=>{ state.plansMode=b.dataset.pmode; render(); });
 }
 
 /* ---------------- sortable + filterable headers ---------------- */
@@ -1318,6 +1363,14 @@ function exportCSV(){
       ...state.cols.map(c=>state.checks[r.id+"::"+c.id]?"Y":""), st.sim_reviewed?"Y":"", st.sent_to_loc?"Y":"", fmtDate(workday(r.first_trench_date,-30,true)), fmtDate(effective(r,"loc_upload")), fmtDate(effective(r,"tasks_start")), fmtDate(r.first_trench_date)]; }); }
   else if(state.view==="changes"){ cols=CHG_COLS.map(c=>c.h); name="takeoff_changes";
     rows=chgRows().map(r=>CHG_COLS.map(c=>c.type==="check"?(r[c.f]?"Y":""):(c.type==="date"?fmtDate(r[c.f]):r[c.f]))); }
+  else if(state.view==="plans"){ const pnm=(planLookup()[state.divKey])||{}; const nameOf=pl=>pnm[String(pl==null?"":pl).trim().toUpperCase()]||"";
+    if((state.plansMode||"community")==="community"){ cols=["Community","Comm #","Plan","Plan Name"]; name="plans_by_community";
+      const m=new Map(); state.flow.forEach(r=>{ const k=r.community_num||r.community_name; if(!k||!r.plan) return; let e=m.get(k); if(!e){ e={name:r.community_name||"",num:r.community_num||"",plans:new Set()}; m.set(k,e);} e.plans.add(String(r.plan)); });
+      rows=[]; [...m.values()].sort((a,b)=>String(a.name).localeCompare(String(b.name))).forEach(e=>{ [...e.plans].sort((a,b)=>a.localeCompare(b,undefined,{numeric:true})).forEach(p=>rows.push([e.name,e.num,p,nameOf(p)])); });
+    } else { cols=["Plan","Plan Name","Community","Comm #"]; name="plans_by_plan";
+      const m=new Map(); state.flow.forEach(r=>{ if(!r.plan) return; const p=String(r.plan); let e=m.get(p); if(!e){ e={plan:p,comms:new Map()}; m.set(p,e);} e.comms.set(r.community_num||r.community_name,{name:r.community_name||"",num:r.community_num||""}); });
+      rows=[]; [...m.values()].sort((a,b)=>a.plan.localeCompare(b.plan,undefined,{numeric:true})).forEach(e=>{ [...e.comms.values()].sort((a,b)=>String(a.name).localeCompare(String(b.name))).forEach(c=>rows.push([e.plan,nameOf(e.plan),c.name,c.num])); });
+    } }
   else { cols=["Community","Comm #","Plan","Plan Name","Ele","Trench"]; name="todo_outstanding";
     rows=todoOutstanding().map(r=>[r.community_name,r.community_num,r.plan,planName(r),r.elevation,fmtDate(r.first_trench_date)]); }
   const csv=[cols,...rows].map(r=>r.map(v=>{ v=v==null?"":String(v);
@@ -1414,18 +1467,20 @@ function parseStartSchedule(wb, div){
   const isPlexBldg=b=>!!b && /^z/i.test(b);
   const bldgCount={};
   for(const r of rows){ const b=S(r["Bldg"]); if(isPlexBldg(b)){ const k=commNum(r)+"|"+b; bldgCount[k]=(bldgCount[k]||0)+1; } }
-  const idName={}; const groups=new Map();
+  const idName={}, nameCount={}; const groups=new Map();
+  const noteName=(num,comm)=>{ if(num&&comm){ (nameCount[num]=nameCount[num]||{})[comm]=(nameCount[num][comm]||0)+1; } };
   for(const r of rows){
     let comm=null, num="", plan=null, ev=null, trench=null; const bldg=S(r["Bldg"]);
     if(r["Comm"]!=null || (r["Job"]!=null && r["Project"]==null)){       // OLH "Permit Log" format
       comm=S(r["Comm"]); num=commNum(r);
       plan = S(r["Plan"]); ev = S(r["EV"])||S(r["Elevation"]);
       trench = xlDate(r["TrenchKey"])||xlDate(r["Start (Prj)"])||xlDate(r["Start (Act)"]);
-      if(num && comm) idName[num]=comm;
+      if(num && comm) idName[num]=comm; noteName(num,comm);
     } else if(r["Project"]!=null){                                       // TPU "Start Log" format
       const proj=S(r["Project"])||""; comm = proj.includes(" - ") ? proj.split(" - ").slice(1).join(" - ").trim() : proj;
       num = commNum(r); plan = S(r["Plan"]); ev = S(r["EV"])||S(r["Elevation"]);
       trench = xlDate(r["ActStart"])||xlDate(r["PrjStart"]);
+      noteName(num,comm);
     } else continue;
     // plex transform: buildings → "{units}-PLEX", elevation → first letter (matches the Flow grid).
     const bp=isPlexBldg(bldg);                // only Z-prefixed buildings are plexes
@@ -1439,7 +1494,13 @@ function parseStartSchedule(wb, div){
     add(plan, ev);                            // the plex ("{N}-PLEX") line, or a normal home line
     if(bp && srcPlan && lc(srcPlan)!==lc(plan)) add(srcPlan, ev);   // ALSO a separate line for each plan in the plex
   }
-  return [...groups.values()];
+  // one canonical name per community number (a start log can list the same number under
+  // several names, e.g. "Angeline 50 T2" / "Angeline 50 CLA") — pick the most common.
+  const canon={};
+  for(const num in nameCount){ let best=null, bn=-1; for(const nm in nameCount[num]){ if(nameCount[num][nm]>bn){ bn=nameCount[num][nm]; best=nm; } } canon[num]=best; }
+  const out=[...groups.values()];
+  out.forEach(g=>{ const c=canon[g.community_num]; if(c) g.community_name=c; });
+  return out;
 }
 async function buildImportPreview(){
   const div=$("adminDiv").value;
