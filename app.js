@@ -824,16 +824,27 @@ function renderPlans(tb,area){
     + `<span class="pl-searchwrap"><input type="text" id="plansSearch" class="pl-search" placeholder="Search ${mode==="community"?"communities":"plans"}… (Enter to add)"><span id="plansChips" class="pl-searchchips"></span></span>`
     + `<button class="btn mini ghost" data-export>&#8681; Export CSV</button>`
     + `<span class="grow"></span>`
-    + `<span class="section-note" style="margin:0">Type to filter; press <b>Enter</b> to add a term and search several ${mode==="community"?"communities":"plans"} at once. Current division only.</span>`;
+    + `<span class="section-note" style="margin:0">Type to filter; press <b>Enter</b> to add a term and search several at once. When you search 2+ ${mode==="community"?"plans":"communities"}, ${mode==="community"?"communities":"plans"} that contain <b>all</b> of them are highlighted and shown first. Current division only.</span>`;
   area.innerHTML=`<div class="pl-list"></div>`;
 
+  const otherNoun = mode==="community" ? "plans" : "communities";
   const paint=()=>{
     const live=lc(($("plansSearch").value||"").trim());
     const terms=[...state.plansTerms]; if(live) terms.push(live);
-    const shown = terms.length ? items.filter(it=>terms.some(t=>it.searchText.includes(t))) : items;
-    $("plansCount").textContent=`${shown.length} ${noun(shown.length)}`;
+    const multi = terms.length>=2;
+    let shown;
+    if(terms.length){
+      shown = items.map(it=>({it, hits:terms.filter(t=>it.searchText.includes(t)).length})).filter(o=>o.hits>0);
+      // when searching several, the ones matching ALL terms rise to the top and get highlighted
+      if(multi) shown.sort((a,b)=>(b.hits===terms.length)-(a.hits===terms.length));
+    } else {
+      shown = items.map(it=>({it,hits:0}));
+    }
+    const allN = multi ? shown.filter(o=>o.hits===terms.length).length : 0;
+    $("plansCount").textContent=`${shown.length} ${noun(shown.length)}` + (multi?` · ${allN} with all ${otherNoun}`:"");
     $("plansChips").innerHTML=state.plansTerms.map((t,i)=>`<span class="pl-term">${esc(t)}<button type="button" class="pl-term-x" data-term="${i}" title="Remove">×</button></span>`).join("");
-    area.querySelector(".pl-list").innerHTML = shown.length ? shown.map(it=>it.cardHTML).join("")
+    area.querySelector(".pl-list").innerHTML = shown.length
+      ? shown.map(o=>(multi && o.hits===terms.length) ? o.it.cardHTML.replace('class="pl-card"','class="pl-card pl-card-all"') : o.it.cardHTML).join("")
       : `<div class="empty">No ${noun(2)} match your search.</div>`;
   };
 
