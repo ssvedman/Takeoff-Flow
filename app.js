@@ -786,75 +786,115 @@ function renderTodo(tb,area){
   bindHeader(area, cols, base);
 }
 
-/* ---------------- TAB 5 · PLANS (cross-reference: communities ↔ plans) ---------------- */
+/* ---------------- TAB 5 · PLANS (cross-reference: communities ↔ plans) ----------------
+   Two modes group the results; a multi-select dropdown (same style as the column filters)
+   picks the OTHER entity to search by:
+     • By community → pick plans; communities that contain ALL picked plans are highlighted + first.
+     • By plan      → pick communities; plans present in ALL picked communities are highlighted + first. */
 function renderPlans(tb,area){
   const mode = state.plansMode || "community";
   const pnm = (planLookup()[state.divKey])||{};
   const nameOf = pl => pnm[String(pl==null?"":pl).trim().toUpperCase()] || "";
   const mkBtn=(m,label)=>`<button class="btn mini ${mode===m?"":"ghost"}" data-pmode="${m}">${label}</button>`;
-  if(!Array.isArray(state.plansTerms)) state.plansTerms=[];
+  if(!Array.isArray(state.plansSel)) state.plansSel=[];
 
-  // Aggregate once; searching/filtering happens locally so the search box keeps focus.
-  const items=[];   // {searchText, cardHTML}
+  // Aggregate. items = the cards; each carries a `set` of the OTHER entity it contains.
+  // options = the pickable universe of that other entity.
+  const items=[]; const optMap=new Map();   // value -> label
   if(mode==="community"){
     const byComm=new Map();
     state.flow.forEach(r=>{ const key=(r.community_num||r.community_name); if(!key||!r.plan) return;
       let e=byComm.get(key); if(!e){ e={name:r.community_name||"", num:r.community_num||"", plans:new Set() }; byComm.set(key,e); } e.plans.add(String(r.plan)); });
     [...byComm.values()].sort((a,b)=>String(a.name).localeCompare(String(b.name))).forEach(e=>{
       const plans=[...e.plans].sort((a,b)=>a.localeCompare(b,undefined,{numeric:true}));
-      items.push({ searchText:lc([e.name,e.num,...plans,...plans.map(nameOf)].join(" ")),
-        cardHTML:`<div class="pl-card"><div class="pl-card-h">${esc(e.name)} <span class="pl-sub">${esc(e.num||"")} · ${plans.length} plan${plans.length===1?"":"s"}</span></div>
-          <div class="pl-chips">${plans.map(p=>{ const nm=nameOf(p); return `<span class="chip" ${nm?`title="${esc(nm)}"`:""}>${esc(p)}${nm?` <span class="pl-nm">${esc(nm)}</span>`:""}</span>`; }).join("")}</div></div>` });
+      plans.forEach(p=>{ if(!optMap.has(p)) optMap.set(p, nameOf(p)?`${p} — ${nameOf(p)}`:p); });
+      items.push({ set:e.plans, name:e.name,
+        card:(hi)=>`<div class="pl-card"><div class="pl-card-h">${esc(e.name)} <span class="pl-sub">${esc(e.num||"")} · ${plans.length} plan${plans.length===1?"":"s"}</span></div>
+          <div class="pl-chips">${plans.map(p=>{ const nm=nameOf(p), on=hi&&hi.has(p); return `<span class="chip${on?" chip-hit":""}" ${nm?`title="${esc(nm)}"`:""}>${esc(p)}${nm?` <span class="pl-nm">${esc(nm)}</span>`:""}</span>`; }).join("")}</div></div>` });
     });
   } else {
     const byPlan=new Map();
-    state.flow.forEach(r=>{ if(!r.plan) return; const p=String(r.plan);
-      let e=byPlan.get(p); if(!e){ e={plan:p, comms:new Map() }; byPlan.set(p,e); } e.comms.set(r.community_num||r.community_name, r.community_name||r.community_num||""); });
+    state.flow.forEach(r=>{ if(!r.plan) return; const p=String(r.plan); const ck=r.community_num||r.community_name; if(!ck) return;
+      let e=byPlan.get(p); if(!e){ e={plan:p, comms:new Map() }; byPlan.set(p,e); } e.comms.set(ck, r.community_name||r.community_num||""); });
     [...byPlan.values()].sort((a,b)=>a.plan.localeCompare(b.plan,undefined,{numeric:true})).forEach(e=>{
-      const comms=[...e.comms.values()].sort((a,b)=>String(a).localeCompare(String(b))); const nm=nameOf(e.plan);
-      items.push({ searchText:lc([e.plan,nm,...comms].join(" ")),
-        cardHTML:`<div class="pl-card"><div class="pl-card-h">${esc(e.plan)}${nm?` <span class="pl-nm">${esc(nm)}</span>`:""} <span class="pl-sub">${comms.length} communit${comms.length===1?"y":"ies"}</span></div>
-          <div class="pl-chips">${comms.map(c=>`<span class="chip">${esc(c)}</span>`).join("")}</div></div>` });
+      const keys=new Set(e.comms.keys());
+      [...e.comms.entries()].forEach(([k,nm])=>{ if(!optMap.has(k)) optMap.set(k, nm||k); });
+      const comms=[...e.comms.entries()].sort((a,b)=>String(a[1]).localeCompare(String(b[1]))); const nm=nameOf(e.plan);
+      items.push({ set:keys, name:e.plan,
+        card:(hi)=>`<div class="pl-card"><div class="pl-card-h">${esc(e.plan)}${nm?` <span class="pl-nm">${esc(nm)}</span>`:""} <span class="pl-sub">${comms.length} communit${comms.length===1?"y":"ies"}</span></div>
+          <div class="pl-chips">${comms.map(([k,cn])=>{ const on=hi&&hi.has(k); return `<span class="chip${on?" chip-hit":""}">${esc(cn||k)}</span>`; }).join("")}</div></div>` });
     });
   }
+  const options=[...optMap.entries()].map(([value,label])=>({value,label,search:lc(value+" "+label)}))
+    .sort((a,b)=>a.value.localeCompare(b.value,undefined,{numeric:true}));
   const noun=n=>mode==="community"?("communit"+(n===1?"y":"ies")):("plan"+(n===1?"":"s"));
+  const pickNoun=mode==="community"?"plans":"communities";
 
   tb.innerHTML=`<span class="count" id="plansCount"></span>`
     + mkBtn("community","By community") + mkBtn("plan","By plan")
-    + `<span class="pl-searchwrap"><input type="text" id="plansSearch" class="pl-search" placeholder="Search ${mode==="community"?"communities":"plans"}… (Enter to add)"><span id="plansChips" class="pl-searchchips"></span></span>`
+    + `<div class="pl-dd" id="plDd">
+         <button type="button" class="btn mini ghost pl-dd-btn" id="plDdBtn"></button>
+         <div class="pl-dd-panel hidden" id="plDdPanel">
+           <input type="text" class="pl-dd-search" id="plDdSearch" placeholder="Search ${pickNoun}…">
+           <button type="button" class="linkbtn pl-dd-master" id="plDdMaster">(Select all)</button>
+           <div class="pl-dd-addrow hidden" id="plDdAddRow"><button type="button" class="linkbtn pl-dd-add" id="plDdAdd">&#10133; Add current results to filter</button><span class="pl-dd-note" id="plDdNote"></span></div>
+           <div class="pl-dd-list" id="plDdList">${options.map(o=>`<label class="msel-opt pl-dd-opt"><input type="checkbox" value="${esc(o.value)}">${esc(o.label)}</label>`).join("")||`<div class="empty" style="padding:12px">None in this division.</div>`}</div>
+         </div>
+       </div>`
     + `<button class="btn mini ghost" data-export>&#8681; Export CSV</button>`
     + `<span class="grow"></span>`
-    + `<span class="section-note" style="margin:0">Type to filter; press <b>Enter</b> to add a term and search several at once. When you search 2+ ${mode==="community"?"plans":"communities"}, ${mode==="community"?"communities":"plans"} that contain <b>all</b> of them are highlighted and shown first. Current division only.</span>`;
+    + `<span class="section-note" style="margin:0">Pick ${pickNoun} from the dropdown to filter. Choose 2+ and the ${noun(2)} containing <b>all</b> of them are highlighted and listed first. Current division only.</span>`;
   area.innerHTML=`<div class="pl-list"></div>`;
 
-  const otherNoun = mode==="community" ? "plans" : "communities";
-  const paint=()=>{
-    const live=lc(($("plansSearch").value||"").trim());
-    const terms=[...state.plansTerms]; if(live) terms.push(live);
-    const multi = terms.length>=2;
-    let shown;
-    if(terms.length){
-      shown = items.map(it=>({it, hits:terms.filter(t=>it.searchText.includes(t)).length})).filter(o=>o.hits>0);
-      // when searching several, the ones matching ALL terms rise to the top and get highlighted
-      if(multi) shown.sort((a,b)=>(b.hits===terms.length)-(a.hits===terms.length));
-    } else {
-      shown = items.map(it=>({it,hits:0}));
-    }
-    const allN = multi ? shown.filter(o=>o.hits===terms.length).length : 0;
-    $("plansCount").textContent=`${shown.length} ${noun(shown.length)}` + (multi?` · ${allN} with all ${otherNoun}`:"");
-    $("plansChips").innerHTML=state.plansTerms.map((t,i)=>`<span class="pl-term">${esc(t)}<button type="button" class="pl-term-x" data-term="${i}" title="Remove">×</button></span>`).join("");
-    area.querySelector(".pl-list").innerHTML = shown.length
-      ? shown.map(o=>(multi && o.hits===terms.length) ? o.it.cardHTML.replace('class="pl-card"','class="pl-card pl-card-all"') : o.it.cardHTML).join("")
-      : `<div class="empty">No ${noun(2)} match your search.</div>`;
-  };
+  const panel=$("plDdPanel"), search=$("plDdSearch"), listEl=$("plDdList");
+  const boxes=()=>[...listEl.querySelectorAll("input[type=checkbox]")];
+  const visBoxes=()=>boxes().filter(b=>b.closest(".pl-dd-opt").style.display!=="none");
+  if(!panel._lock) panel._lock=new Set();
 
-  tb.querySelectorAll("[data-pmode]").forEach(b=>b.onclick=()=>{ state.plansMode=b.dataset.pmode; state.plansTerms=[]; render(); });
-  const box=$("plansSearch");
-  box.addEventListener("input",paint);
-  box.addEventListener("keydown",e=>{ if(e.key==="Enter"){ e.preventDefault(); const v=lc(box.value.trim()); if(v && !state.plansTerms.includes(v)) state.plansTerms.push(v); box.value=""; paint(); }
-    else if(e.key==="Backspace" && !box.value && state.plansTerms.length){ state.plansTerms.pop(); paint(); } });
-  $("plansChips").addEventListener("click",e=>{ const x=e.target.closest(".pl-term-x"); if(x){ state.plansTerms.splice(+x.dataset.term,1); paint(); } });
-  paint();
+  const paint=()=>{
+    const sel=new Set(boxes().filter(b=>b.checked).map(b=>b.value));
+    state.plansSel=[...sel];
+    $("plDdBtn").innerHTML=(sel.size?`${sel.size} ${pickNoun} selected`:`Filter by ${pickNoun}…`)+" &#9662;";
+    const multi=sel.size>=2;
+    let shown;
+    if(sel.size){
+      shown=items.map(it=>{ let hits=0; it.set.forEach(v=>{ if(sel.has(v)) hits++; }); return {it,hits}; }).filter(o=>o.hits>0);
+      if(multi) shown.sort((a,b)=>(b.hits===sel.size)-(a.hits===sel.size));
+    } else shown=items.map(it=>({it,hits:0}));
+    const allN=multi?shown.filter(o=>o.hits===sel.size).length:0;
+    $("plansCount").textContent=`${shown.length} ${noun(shown.length)}`+(multi?` · ${allN} with all ${pickNoun}`:"");
+    area.querySelector(".pl-list").innerHTML = shown.length
+      ? shown.map(o=>{ const all=multi&&o.hits===sel.size; const html=o.it.card(sel.size?sel:null); return all?html.replace('class="pl-card"','class="pl-card pl-card-all"'):html; }).join("")
+      : `<div class="empty">No ${noun(2)} match your selection.</div>`;
+  };
+  const syncMaster=()=>{ const q=search.value.trim(); const vis=visBoxes(), on=vis.filter(b=>b.checked).length;
+    const box=on===0?"&#9744;":((vis.length&&on===vis.length)?"&#9745;":"&#9632;");
+    $("plDdMaster").innerHTML=box+" "+(q?"Select all search results":"Select all");
+    const n=panel._lock.size, note=$("plDdNote");
+    $("plDdAddRow").classList.toggle("hidden", !(q||n));
+    if(note) note.innerHTML=n?`${n} kept &middot; <a href="#" class="pl-dd-clear">clear</a>`:""; };
+
+  // restore prior selection
+  const prev=new Set(state.plansSel); boxes().forEach(b=>{ if(prev.has(b.value)) b.checked=true; });
+
+  $("plDdBtn").addEventListener("click",e=>{ e.stopPropagation(); const hid=panel.classList.toggle("hidden"); if(!hid){ search.focus(); } });
+  panel.addEventListener("click",e=>{ e.stopPropagation(); const c=e.target.closest(".pl-dd-clear"); if(c){ e.preventDefault(); panel._lock.clear(); const q=search.value.trim().toLowerCase(); boxes().forEach(b=>{ if(q) b.checked=b.closest(".pl-dd-opt").textContent.toLowerCase().includes(q); }); paint(); syncMaster(); } });
+  if(window._plDdClose) document.removeEventListener("click",window._plDdClose);
+  window._plDdClose=()=>{ const p=$("plDdPanel"); if(p&&!p.classList.contains("hidden")) p.classList.add("hidden"); };
+  document.addEventListener("click",window._plDdClose);
+  search.addEventListener("input",()=>{
+    const q=search.value.trim().toLowerCase();
+    boxes().forEach(b=>{ const o=b.closest(".pl-dd-opt"); const m=(!q||o.textContent.toLowerCase().includes(q)); o.style.display=m?"":"none";
+      if(q) b.checked=m||panel._lock.has(b.value); });   // current matches become the selection; kept stay selected
+    paint(); syncMaster();
+  });
+  search.addEventListener("keydown",e=>{ if(e.key==="Enter"){ e.preventDefault(); panel.classList.add("hidden"); } });
+  $("plDdMaster").addEventListener("click",()=>{ const vis=visBoxes(); const allOn=vis.length&&vis.every(b=>b.checked); vis.forEach(b=>b.checked=!allOn); if(!allOn) panel._lock.clear(); paint(); syncMaster(); });
+  $("plDdAdd").addEventListener("click",()=>{ visBoxes().forEach(b=>{ if(b.checked) panel._lock.add(b.value); }); search.value=""; boxes().forEach(b=>{ b.closest(".pl-dd-opt").style.display=""; b.checked=panel._lock.has(b.value); }); paint(); syncMaster(); search.focus(); });
+  listEl.addEventListener("change",()=>{ paint(); syncMaster(); });
+
+  tb.querySelectorAll("[data-pmode]").forEach(b=>b.onclick=()=>{ state.plansMode=b.dataset.pmode; state.plansSel=[]; if(panel)panel._lock=new Set(); render(); });
+  paint(); syncMaster();
 }
 
 /* ---------------- sortable + filterable headers ---------------- */
@@ -1395,13 +1435,13 @@ function exportCSV(){
   else if(state.view==="changes"){ cols=CHG_COLS.map(c=>c.h); name="takeoff_changes";
     rows=chgRows().map(r=>CHG_COLS.map(c=>c.type==="check"?(r[c.f]?"Y":""):(c.type==="date"?fmtDate(r[c.f]):r[c.f]))); }
   else if(state.view==="plans"){ const pnm=(planLookup()[state.divKey])||{}; const nameOf=pl=>pnm[String(pl==null?"":pl).trim().toUpperCase()]||"";
-    const terms=Array.isArray(state.plansTerms)?state.plansTerms:[]; const keep=txt=>!terms.length||terms.some(t=>lc(txt).includes(t));
+    const sel=new Set(Array.isArray(state.plansSel)?state.plansSel:[]);
     if((state.plansMode||"community")==="community"){ cols=["Community","Comm #","Plan","Plan Name"]; name="plans_by_community";
       const m=new Map(); state.flow.forEach(r=>{ const k=r.community_num||r.community_name; if(!k||!r.plan) return; let e=m.get(k); if(!e){ e={name:r.community_name||"",num:r.community_num||"",plans:new Set()}; m.set(k,e);} e.plans.add(String(r.plan)); });
-      rows=[]; [...m.values()].sort((a,b)=>String(a.name).localeCompare(String(b.name))).forEach(e=>{ const plans=[...e.plans]; if(!keep([e.name,e.num,...plans,...plans.map(nameOf)].join(" "))) return; plans.sort((a,b)=>a.localeCompare(b,undefined,{numeric:true})).forEach(p=>rows.push([e.name,e.num,p,nameOf(p)])); });
+      rows=[]; [...m.values()].sort((a,b)=>String(a.name).localeCompare(String(b.name))).forEach(e=>{ if(sel.size && ![...e.plans].some(p=>sel.has(p))) return; [...e.plans].sort((a,b)=>a.localeCompare(b,undefined,{numeric:true})).forEach(p=>rows.push([e.name,e.num,p,nameOf(p)])); });
     } else { cols=["Plan","Plan Name","Community","Comm #"]; name="plans_by_plan";
-      const m=new Map(); state.flow.forEach(r=>{ if(!r.plan) return; const p=String(r.plan); let e=m.get(p); if(!e){ e={plan:p,comms:new Map()}; m.set(p,e);} e.comms.set(r.community_num||r.community_name,{name:r.community_name||"",num:r.community_num||""}); });
-      rows=[]; [...m.values()].sort((a,b)=>a.plan.localeCompare(b.plan,undefined,{numeric:true})).forEach(e=>{ const comms=[...e.comms.values()]; if(!keep([e.plan,nameOf(e.plan),...comms.map(c=>c.name)].join(" "))) return; comms.sort((a,b)=>String(a.name).localeCompare(String(b.name))).forEach(c=>rows.push([e.plan,nameOf(e.plan),c.name,c.num])); });
+      const m=new Map(); state.flow.forEach(r=>{ if(!r.plan) return; const p=String(r.plan); const ck=r.community_num||r.community_name; if(!ck) return; let e=m.get(p); if(!e){ e={plan:p,comms:new Map()}; m.set(p,e);} e.comms.set(ck,{name:r.community_name||"",num:r.community_num||""}); });
+      rows=[]; [...m.values()].sort((a,b)=>a.plan.localeCompare(b.plan,undefined,{numeric:true})).forEach(e=>{ if(sel.size && ![...e.comms.keys()].some(k=>sel.has(k))) return; [...e.comms.values()].sort((a,b)=>String(a.name).localeCompare(String(b.name))).forEach(c=>rows.push([e.plan,nameOf(e.plan),c.name,c.num])); });
     } }
   else { cols=["Community","Comm #","Plan","Plan Name","Ele","Trench"]; name="todo_outstanding";
     rows=todoOutstanding().map(r=>[r.community_name,r.community_num,r.plan,planName(r),r.elevation,fmtDate(r.first_trench_date)]); }
