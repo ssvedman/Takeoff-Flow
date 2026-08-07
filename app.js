@@ -789,45 +789,61 @@ function renderTodo(tb,area){
 /* ---------------- TAB 5 · PLANS (cross-reference: communities ↔ plans) ---------------- */
 function renderPlans(tb,area){
   const mode = state.plansMode || "community";
-  const q = lc(state.filter);
   const pnm = (planLookup()[state.divKey])||{};
   const nameOf = pl => pnm[String(pl==null?"":pl).trim().toUpperCase()] || "";
   const mkBtn=(m,label)=>`<button class="btn mini ${mode===m?"":"ghost"}" data-pmode="${m}">${label}</button>`;
-  let bodyHTML="", count=0;
+  if(!Array.isArray(state.plansTerms)) state.plansTerms=[];
+
+  // Aggregate once; searching/filtering happens locally so the search box keeps focus.
+  const items=[];   // {searchText, cardHTML}
   if(mode==="community"){
     const byComm=new Map();
     state.flow.forEach(r=>{ const key=(r.community_num||r.community_name); if(!key||!r.plan) return;
       let e=byComm.get(key); if(!e){ e={name:r.community_name||"", num:r.community_num||"", plans:new Set() }; byComm.set(key,e); } e.plans.add(String(r.plan)); });
-    let list=[...byComm.values()];
-    if(q) list=list.filter(e=>lc(e.name).includes(q)||lc(e.num).includes(q));
-    list.sort((a,b)=>String(a.name).localeCompare(String(b.name)));
-    count=list.length;
-    bodyHTML = list.length ? list.map(e=>{
+    [...byComm.values()].sort((a,b)=>String(a.name).localeCompare(String(b.name))).forEach(e=>{
       const plans=[...e.plans].sort((a,b)=>a.localeCompare(b,undefined,{numeric:true}));
-      return `<div class="pl-card"><div class="pl-card-h">${esc(e.name)} <span class="pl-sub">${esc(e.num||"")} · ${plans.length} plan${plans.length===1?"":"s"}</span></div>
-        <div class="pl-chips">${plans.map(p=>{ const nm=nameOf(p); return `<span class="chip" ${nm?`title="${esc(nm)}"`:""}>${esc(p)}${nm?` <span class="pl-nm">${esc(nm)}</span>`:""}</span>`; }).join("")}</div></div>`;
-    }).join("") : `<div class="empty">No communities${q?" match your search":""}.</div>`;
+      items.push({ searchText:lc([e.name,e.num,...plans,...plans.map(nameOf)].join(" ")),
+        cardHTML:`<div class="pl-card"><div class="pl-card-h">${esc(e.name)} <span class="pl-sub">${esc(e.num||"")} · ${plans.length} plan${plans.length===1?"":"s"}</span></div>
+          <div class="pl-chips">${plans.map(p=>{ const nm=nameOf(p); return `<span class="chip" ${nm?`title="${esc(nm)}"`:""}>${esc(p)}${nm?` <span class="pl-nm">${esc(nm)}</span>`:""}</span>`; }).join("")}</div></div>` });
+    });
   } else {
     const byPlan=new Map();
     state.flow.forEach(r=>{ if(!r.plan) return; const p=String(r.plan);
       let e=byPlan.get(p); if(!e){ e={plan:p, comms:new Map() }; byPlan.set(p,e); } e.comms.set(r.community_num||r.community_name, r.community_name||r.community_num||""); });
-    let list=[...byPlan.values()];
-    if(q) list=list.filter(e=>lc(e.plan).includes(q)||lc(nameOf(e.plan)).includes(q));
-    list.sort((a,b)=>a.plan.localeCompare(b.plan,undefined,{numeric:true}));
-    count=list.length;
-    bodyHTML = list.length ? list.map(e=>{
+    [...byPlan.values()].sort((a,b)=>a.plan.localeCompare(b.plan,undefined,{numeric:true})).forEach(e=>{
       const comms=[...e.comms.values()].sort((a,b)=>String(a).localeCompare(String(b))); const nm=nameOf(e.plan);
-      return `<div class="pl-card"><div class="pl-card-h">${esc(e.plan)}${nm?` <span class="pl-nm">${esc(nm)}</span>`:""} <span class="pl-sub">${comms.length} communit${comms.length===1?"y":"ies"}</span></div>
-        <div class="pl-chips">${comms.map(c=>`<span class="chip">${esc(c)}</span>`).join("")}</div></div>`;
-    }).join("") : `<div class="empty">No plans${q?" match your search":""}.</div>`;
+      items.push({ searchText:lc([e.plan,nm,...comms].join(" ")),
+        cardHTML:`<div class="pl-card"><div class="pl-card-h">${esc(e.plan)}${nm?` <span class="pl-nm">${esc(nm)}</span>`:""} <span class="pl-sub">${comms.length} communit${comms.length===1?"y":"ies"}</span></div>
+          <div class="pl-chips">${comms.map(c=>`<span class="chip">${esc(c)}</span>`).join("")}</div></div>` });
+    });
   }
-  tb.innerHTML=`<span class="count">${count} ${mode==="community"?"communit"+(count===1?"y":"ies"):"plan"+(count===1?"":"s")}</span>`
+  const noun=n=>mode==="community"?("communit"+(n===1?"y":"ies")):("plan"+(n===1?"":"s"));
+
+  tb.innerHTML=`<span class="count" id="plansCount"></span>`
     + mkBtn("community","By community") + mkBtn("plan","By plan")
+    + `<span class="pl-searchwrap"><input type="text" id="plansSearch" class="pl-search" placeholder="Search ${mode==="community"?"communities":"plans"}… (Enter to add)"><span id="plansChips" class="pl-searchchips"></span></span>`
     + `<button class="btn mini ghost" data-export>&#8681; Export CSV</button>`
     + `<span class="grow"></span>`
-    + `<span class="section-note" style="margin:0">${mode==="community"?"Search a community (top bar) to see every plan active in it.":"Search a plan number or name to see every community it's in."} Current division only.</span>`;
-  area.innerHTML=`<div class="pl-list">${bodyHTML}</div>`;
-  tb.querySelectorAll("[data-pmode]").forEach(b=>b.onclick=()=>{ state.plansMode=b.dataset.pmode; render(); });
+    + `<span class="section-note" style="margin:0">Type to filter; press <b>Enter</b> to add a term and search several ${mode==="community"?"communities":"plans"} at once. Current division only.</span>`;
+  area.innerHTML=`<div class="pl-list"></div>`;
+
+  const paint=()=>{
+    const live=lc(($("plansSearch").value||"").trim());
+    const terms=[...state.plansTerms]; if(live) terms.push(live);
+    const shown = terms.length ? items.filter(it=>terms.some(t=>it.searchText.includes(t))) : items;
+    $("plansCount").textContent=`${shown.length} ${noun(shown.length)}`;
+    $("plansChips").innerHTML=state.plansTerms.map((t,i)=>`<span class="pl-term">${esc(t)}<button type="button" class="pl-term-x" data-term="${i}" title="Remove">×</button></span>`).join("");
+    area.querySelector(".pl-list").innerHTML = shown.length ? shown.map(it=>it.cardHTML).join("")
+      : `<div class="empty">No ${noun(2)} match your search.</div>`;
+  };
+
+  tb.querySelectorAll("[data-pmode]").forEach(b=>b.onclick=()=>{ state.plansMode=b.dataset.pmode; state.plansTerms=[]; render(); });
+  const box=$("plansSearch");
+  box.addEventListener("input",paint);
+  box.addEventListener("keydown",e=>{ if(e.key==="Enter"){ e.preventDefault(); const v=lc(box.value.trim()); if(v && !state.plansTerms.includes(v)) state.plansTerms.push(v); box.value=""; paint(); }
+    else if(e.key==="Backspace" && !box.value && state.plansTerms.length){ state.plansTerms.pop(); paint(); } });
+  $("plansChips").addEventListener("click",e=>{ const x=e.target.closest(".pl-term-x"); if(x){ state.plansTerms.splice(+x.dataset.term,1); paint(); } });
+  paint();
 }
 
 /* ---------------- sortable + filterable headers ---------------- */
@@ -913,7 +929,7 @@ function theadHTML(cols, hasHandle){
 }
 /* ---- multi-select filter dropdown (msel), lazily built on open ---- */
 let _openMsel=null, _openMselW=null;
-let _mselWork=null, _mselAll=null, _mselCol=null, _mselDirty=false, _mselBase=null;
+let _mselWork=null, _mselAll=null, _mselCol=null, _mselDirty=false, _mselLock=null;
 /* Excel-style filter: a working selection Set drives everything. Typing in the search
    applies live (matches become the selection); "Add current selection to filter" makes a
    new search ADD its matches to what's already selected instead of replacing. */
@@ -945,7 +961,7 @@ function refreshMonthStates(w){
 function buildMselPanel(w, col, baseRows){
   const panel=w.querySelector("[data-mpanel]");
   const ctl=`<label class="msel-opt msel-ctl msel-selall"><input type="checkbox" class="msel-allbox"> <span class="msel-alltext">(Select all)</span></label>`
-    +`<label class="msel-opt msel-ctl msel-addfilter hidden"><input type="checkbox" class="msel-addbox"> Add current selection to filter</label>`
+    +`<div class="msel-opt msel-ctl msel-addfilter hidden"><button type="button" class="linkbtn msel-addbtn">&#10133; Add current results to filter</button><span class="msel-addnote"></span></div>`
     +`<div class="msel-sep"></div>`;
   let body;
   if(col.fdate){ body=datePanelHTML(col,baseRows); }
@@ -965,7 +981,9 @@ function mselSyncBoxes(w){ mselBoxes(w).forEach(b=>b.checked=_mselWork.has(b.val
 function mselSyncMaster(w){
   const q=(w.querySelector(".msel-search").value||"").trim();
   const at=w.querySelector(".msel-alltext"); if(at) at.textContent=q?"(Select all search results)":"(Select all)";
-  const af=w.querySelector(".msel-addfilter"); if(af) af.classList.toggle("hidden", !q);
+  const lockN=_mselLock?_mselLock.size:0;
+  const af=w.querySelector(".msel-addfilter"); if(af) af.classList.toggle("hidden", !(q||lockN));
+  const note=w.querySelector(".msel-addnote"); if(note) note.innerHTML=lockN?` &middot; ${lockN} kept &middot; <a href="#" class="msel-clearadd">clear</a>`:"";
   const vis=mselBoxes(w).filter(mselVisible), on=vis.filter(b=>b.checked).length, m=w.querySelector(".msel-allbox");
   if(m){ m.checked=vis.length>0&&on===vis.length; m.indeterminate=on>0&&on<vis.length; }
 }
@@ -983,15 +1001,13 @@ function mselApplyVisibility(w,col,q){
 }
 function mselSearch(w,col){
   const q=(w.querySelector(".msel-search").value||"").trim().toLowerCase();
-  const addMode=!!(w.querySelector(".msel-addbox")||{}).checked;
   mselApplyVisibility(w,col,q);
   if(q){
+    // The current search's matches become the selection; anything already "kept"
+    // (added to the filter earlier) stays selected too — so searches accumulate.
     const matches=mselBoxes(w).filter(mselVisible).map(b=>b.value);
-    // add mode unions the matches onto a fixed base (snapshot), so it's stable per keystroke
-    // instead of piling up every prefix's matches; replace mode just becomes the matches.
-    _mselWork = addMode ? new Set([...(_mselBase||[]), ...matches]) : new Set(matches);
-  } else if(addMode){
-    _mselBase = new Set(_mselWork);   // finished a term — bake it so the next search adds to it
+    _mselWork = new Set(matches);
+    if(_mselLock) _mselLock.forEach(v=>_mselWork.add(v));
   }
   mselSyncBoxes(w); mselSyncMaster(w); mselCommit(w,col);
 }
@@ -1006,16 +1022,20 @@ function mselCommit(w,col){
 function wireMselPanel(w, col){
   const panel=w.querySelector("[data-mpanel]");
   panel.addEventListener("click",e=>e.stopPropagation());
-  _mselCol=col; _mselAll=mselBoxes(w).map(b=>b.value);
+  _mselCol=col; _mselAll=mselBoxes(w).map(b=>b.value); _mselLock=new Set();
   const committed=colFilterMap()[col.f];
   _mselWork = (committed instanceof Set) ? new Set([...committed]) : new Set(_mselAll);
-  _mselBase = new Set(_mselWork);
   mselSyncBoxes(w); mselSyncMaster(w);
   const searchEl=panel.querySelector(".msel-search");
   searchEl.addEventListener("input",()=>mselSearch(w,col));
   searchEl.addEventListener("keydown",e=>{ if(e.key==="Enter"){ e.preventDefault(); panel.classList.add("hidden"); _openMsel=null; _openMselW=null; applyMselIfDirty(); } });
-  const addbox=panel.querySelector(".msel-addbox");
-  if(addbox) addbox.addEventListener("change",()=>{ if(addbox.checked) _mselBase=new Set(_mselWork); });
+  const addBtn=panel.querySelector(".msel-addbtn");
+  if(addBtn) addBtn.addEventListener("click",()=>{
+    mselBoxes(w).filter(b=>mselVisible(b)&&b.checked).forEach(b=>_mselLock.add(b.value));  // keep current results
+    searchEl.value=""; _mselWork=new Set(_mselLock);
+    mselApplyVisibility(w,col,""); mselSyncBoxes(w); mselSyncMaster(w); mselCommit(w,col); searchEl.focus();
+  });
+  panel.addEventListener("click",e=>{ const c=e.target.closest(".msel-clearadd"); if(c){ e.preventDefault(); _mselLock=new Set(); mselSearch(w,col); } });
   panel.querySelector(".msel-allbox").addEventListener("change",e=>{ const on=e.target.checked;
     mselBoxes(w).filter(mselVisible).forEach(b=>{ if(on) _mselWork.add(b.value); else _mselWork.delete(b.value); });
     mselSyncBoxes(w); mselSyncMaster(w); mselCommit(w,col); });
@@ -1364,12 +1384,13 @@ function exportCSV(){
   else if(state.view==="changes"){ cols=CHG_COLS.map(c=>c.h); name="takeoff_changes";
     rows=chgRows().map(r=>CHG_COLS.map(c=>c.type==="check"?(r[c.f]?"Y":""):(c.type==="date"?fmtDate(r[c.f]):r[c.f]))); }
   else if(state.view==="plans"){ const pnm=(planLookup()[state.divKey])||{}; const nameOf=pl=>pnm[String(pl==null?"":pl).trim().toUpperCase()]||"";
+    const terms=Array.isArray(state.plansTerms)?state.plansTerms:[]; const keep=txt=>!terms.length||terms.some(t=>lc(txt).includes(t));
     if((state.plansMode||"community")==="community"){ cols=["Community","Comm #","Plan","Plan Name"]; name="plans_by_community";
       const m=new Map(); state.flow.forEach(r=>{ const k=r.community_num||r.community_name; if(!k||!r.plan) return; let e=m.get(k); if(!e){ e={name:r.community_name||"",num:r.community_num||"",plans:new Set()}; m.set(k,e);} e.plans.add(String(r.plan)); });
-      rows=[]; [...m.values()].sort((a,b)=>String(a.name).localeCompare(String(b.name))).forEach(e=>{ [...e.plans].sort((a,b)=>a.localeCompare(b,undefined,{numeric:true})).forEach(p=>rows.push([e.name,e.num,p,nameOf(p)])); });
+      rows=[]; [...m.values()].sort((a,b)=>String(a.name).localeCompare(String(b.name))).forEach(e=>{ const plans=[...e.plans]; if(!keep([e.name,e.num,...plans,...plans.map(nameOf)].join(" "))) return; plans.sort((a,b)=>a.localeCompare(b,undefined,{numeric:true})).forEach(p=>rows.push([e.name,e.num,p,nameOf(p)])); });
     } else { cols=["Plan","Plan Name","Community","Comm #"]; name="plans_by_plan";
       const m=new Map(); state.flow.forEach(r=>{ if(!r.plan) return; const p=String(r.plan); let e=m.get(p); if(!e){ e={plan:p,comms:new Map()}; m.set(p,e);} e.comms.set(r.community_num||r.community_name,{name:r.community_name||"",num:r.community_num||""}); });
-      rows=[]; [...m.values()].sort((a,b)=>a.plan.localeCompare(b.plan,undefined,{numeric:true})).forEach(e=>{ [...e.comms.values()].sort((a,b)=>String(a.name).localeCompare(String(b.name))).forEach(c=>rows.push([e.plan,nameOf(e.plan),c.name,c.num])); });
+      rows=[]; [...m.values()].sort((a,b)=>a.plan.localeCompare(b.plan,undefined,{numeric:true})).forEach(e=>{ const comms=[...e.comms.values()]; if(!keep([e.plan,nameOf(e.plan),...comms.map(c=>c.name)].join(" "))) return; comms.sort((a,b)=>String(a.name).localeCompare(String(b.name))).forEach(c=>rows.push([e.plan,nameOf(e.plan),c.name,c.num])); });
     } }
   else { cols=["Community","Comm #","Plan","Plan Name","Ele","Trench"]; name="todo_outstanding";
     rows=todoOutstanding().map(r=>[r.community_name,r.community_num,r.plan,planName(r),r.elevation,fmtDate(r.first_trench_date)]); }

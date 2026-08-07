@@ -105,7 +105,11 @@ table.grid thead tr.filterrow th{position:sticky;top:30px;height:30px;box-sizing
 .msel-search:focus{outline:none;border-color:var(--blue)}
 /* filter control rows (Select all / Add current selection to filter) */
 .msel-ctl{font-weight:600}
-.msel-addfilter{font-weight:500;color:var(--muted)}
+.msel-addfilter{font-weight:500;color:var(--muted);display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.msel-addbtn{font-weight:600;color:var(--blue);padding:0}
+.msel-addnote{font-size:11.5px;color:var(--muted)}
+.msel-clearadd{color:var(--blue);text-decoration:none}
+.msel-clearadd:hover{text-decoration:underline}
 .msel-sep{height:1px;background:var(--line);margin:4px 2px 5px}
 /* date filter tree (Excel-style month → day accordion) */
 .msel-mhead{display:flex;align-items:center;gap:0}
@@ -373,6 +377,14 @@ table.grid tbody td.handle-td{ overflow:visible!important; position:relative; }
 .pl-chips{display:flex;flex-wrap:wrap}
 .pl-chips .chip .pl-nm{color:var(--blue);opacity:.75;margin-left:3px}
 [data-theme="dark"] .pl-card-h{color:#dce6f5}
+.pl-searchwrap{display:inline-flex;align-items:center;flex-wrap:wrap;gap:6px}
+.pl-search{padding:5px 10px;border:1.5px solid var(--line);border-radius:8px;font-size:13px;background:var(--card);color:var(--ink);min-width:190px}
+.pl-search:focus{outline:none;border-color:var(--blue)}
+.pl-searchchips{display:inline-flex;flex-wrap:wrap;gap:4px}
+.pl-term{display:inline-flex;align-items:center;gap:4px;background:var(--blue-050);color:var(--blue);border-radius:20px;padding:2px 4px 2px 10px;font-size:12px;font-weight:600}
+.pl-term-x{border:none;background:none;color:var(--blue);cursor:pointer;font-size:15px;line-height:1;padding:0 4px;border-radius:50%}
+.pl-term-x:hover{background:rgba(0,87,184,.15)}
+[data-theme="dark"] .pl-term{background:#12314f;color:#8fbdf2}
 
 /* ---------- Live-status indicator ---------- */
 .live-dot{ font-size:11.5px; color:var(--muted); display:inline-flex; align-items:center; gap:6px; }
