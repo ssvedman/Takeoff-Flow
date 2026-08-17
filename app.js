@@ -1893,7 +1893,7 @@ async function genResetLink(){
     const { data, error }=await sb.rpc("tf_admin_add_or_reset",{ target_email:email });   // authorizes via tf_app_roles (Takeoff Flow's own admins)
     if(error) throw error;
     const token=data&&data.token; if(!token) throw new Error("No link was returned.");
-    const url=location.origin+location.pathname+"#recover="+encodeURIComponent(token);
+    const url=((CFG.BLUEPRINT_URL||(location.origin+location.pathname)).replace(/#.*$/,""))+"#recover="+encodeURIComponent(token);
     $("resetLink").value=url; $("resetOut").classList.remove("hidden");
     resetMsg((data.created?"New account created for ":"Reset link ready for ")+email+" — copy the link and send it. It expires in 24 hours.","ok");
   }catch(e){ resetMsg(prettyErr(e,"Could not generate a link."),"err"); }
@@ -1908,7 +1908,7 @@ async function inviteUser(email){
     const { data, error }=await sb.rpc("tf_admin_add_or_reset",{ target_email:email });
     if(error) throw error;
     const token=data&&data.token; if(!token) throw new Error("No link was returned.");
-    const url=location.origin+location.pathname+"#recover="+encodeURIComponent(token);
+    const url=((CFG.BLUEPRINT_URL||(location.origin+location.pathname)).replace(/#.*$/,""))+"#recover="+encodeURIComponent(token);
     showInviteModal(email, url, (data.created?"New account created. ":"")+"Copy this one-time link (valid 24 hours) and send it to the user — it lets them set their own password. No email is sent.");
   }catch(e){ showInviteModal(email, null, "Couldn't create a link: "+prettyErr(e,"unknown error")); }
 }

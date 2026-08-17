@@ -8,6 +8,17 @@ window.APP_CONFIG = {
   SUPABASE_URL:  "https://memhzqphludiruovuzwt.supabase.co",
   SUPABASE_ANON_KEY: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1lbWh6cXBobHVkaXJ1b3Z1end0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQyMTI3MjUsImV4cCI6MjA5OTc4ODcyNX0.hTJBtb3WtkgY66xqzZ22GT7V4VNllxPyb4C7qXRFFVI",
 
+  // ---- Blueprint hub -------------------------------------------------------
+  // Invite / password-reset links generated here land on Blueprint rather than
+  // on this app, so one branded page sets the password and then shows the person
+  // every tool they have access to. The token itself is unchanged — Blueprint
+  // redeems it with the same function this app would have used.
+  //
+  // Capital B: GitHub Pages paths are case-sensitive.
+  // If this is ever blank, link generation falls back to this app's own URL,
+  // which is exactly the behaviour before the change.
+  BLUEPRINT_URL: "https://ssvedman.github.io/Blueprint/",
+
   // Login is restricted to this email domain.
   ALLOWED_DOMAIN: "@lennar.com",
 
