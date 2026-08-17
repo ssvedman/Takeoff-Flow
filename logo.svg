@@ -1,4 +1,12 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Takeoff Flow">
-  <rect width="64" height="64" rx="14" fill="#0057b8"/>
-  <text x="32" y="43" text-anchor="middle" font-family="'Segoe UI', system-ui, -apple-system, Arial, sans-serif" font-size="27" font-weight="700" fill="#ffffff">TF</text>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48" fill="none" role="img" aria-label="Takeoff Flow">
+  <rect width="48" height="48" rx="10" fill="#0a2540"/>
+  <!-- schedule staircase: each tread a stage, rising left to right -->
+  <path d="M12 33H20V25H28V17H33" stroke="#4d92e0" stroke-width="2.4"
+        stroke-linejoin="round" stroke-linecap="round"/>
+  <!-- arrowhead: the flow continues -->
+  <path d="M31 14L34.5 17L31 20" stroke="#eaf2fc" stroke-width="2.4"
+        stroke-linejoin="round" stroke-linecap="round"/>
+  <!-- milestones sitting on the path -->
+  <circle cx="16" cy="33" r="2.4" fill="#eaf2fc"/>
+  <circle cx="24" cy="25" r="2.4" fill="#0057b8"/>
 </svg>
