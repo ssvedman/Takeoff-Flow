@@ -11,6 +11,16 @@ let sb = null;
 if (!DEMO && window.supabase) sb = window.supabase.createClient(CFG.SUPABASE_URL, CFG.SUPABASE_ANON_KEY, {
   auth: { persistSession:true, autoRefreshToken:true, detectSessionInUrl:true, storageKey:"lennar-vendor-portal-auth" }
 });
+/* Sign out in one app signs out of all of them. All four sites share an origin and
+   the storageKey above, so clearing the session raises a storage event in every
+   other open tab. Without this an already-open tab keeps its in-memory session and
+   its cached JWT stays valid until expiry — it would look signed in for up to an
+   hour after you signed out elsewhere. */
+if (!DEMO && window.supabase) {
+  window.addEventListener("storage", function (e) {
+    if (e.key === "lennar-vendor-portal-auth" && !e.newValue) location.reload();
+  });
+}
 const HOLIDAYS = new Set(CFG.HOLIDAYS || []);
 
 const state = {
@@ -398,7 +408,7 @@ function bootApp(){
   $("adminLink").onclick=()=>showAdmin();
   $("themeBtn").onclick=toggleTheme;
   $("whatsNewBtn").onclick=openWhatsNew;
-  $("logoutBtn").onclick=async()=>{ if(!DEMO&&sb) await sb.auth.signOut(); location.reload(); };
+  $("logoutBtn").onclick=async()=>{ if(!DEMO&&sb){ try{ await sb.auth.signOut({scope:"global"}); }catch(e){} try{ localStorage.removeItem("lennar-vendor-portal-auth"); }catch(e){} } location.reload(); };
   $("globalSearch").oninput=e=>{ state.filter=lc(e.target.value); render(); };
   loadPlanNames().then(()=>loadDivision(state.divKey)).then(()=>{ render(); refreshWhatsNewBadge(); startRealtime(); });
 }
