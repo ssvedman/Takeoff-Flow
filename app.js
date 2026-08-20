@@ -559,11 +559,12 @@ function renderBudgets(tb,area){
   h+=`</tr><tr class="filterrow">`;
   cols.forEach(col=>h+=filterCellHTML(col));
   h+=`</tr></thead><tbody>`;
-  const spanN=4+state.cols.length+6;
+  const spanN=5+state.cols.length+6;
   if(!rows.length) h+=`<tr><td colspan="${spanN}"><div class="empty">No rows. Add rows on the Flow of Takeoffs tab.</div></td></tr>`;
   rows.forEach(r=>{
     const st=state.status[r.id]||{sim_reviewed:false,sent_to_loc:false};
     h+=`<tr><td><span class="cell"><span class="val">${esc(r.community_name||'')}</span></span></td>`
+      + `<td><span class="cell"><span class="val">${esc(r.community_num||'')}</span></span></td>`
       + `<td><span class="cell"><span class="val">${esc(r.plan||'')}</span></span></td>`
       + `<td><span class="cell"><span class="val">${esc(planName(r))}</span></span></td>`
       + `<td><span class="cell"><span class="val">${esc(r.elevation||'')}</span></span></td>`
@@ -597,6 +598,7 @@ function renderBudgets(tb,area){
 function budgetCols(){
   const list=[
     {f:"community_name",h:"Community",disp:r=>r.community_name||"",raw:r=>r.community_name||""},
+    {f:"community_num",h:"Community #",disp:r=>r.community_num||"",raw:r=>r.community_num||""},
     {f:"plan",h:"Plan",disp:r=>r.plan||"",raw:r=>r.plan||""},
     {f:"plan_name",h:"Plan Name",disp:r=>planName(r),raw:r=>planName(r)},
     {f:"elevation",h:"Elev",disp:r=>r.elevation||"",raw:r=>r.elevation||""},
@@ -1439,8 +1441,8 @@ function exportCSV(){
   let cols,rows,name;
   if(state.view==="flow"){ cols=FLOW_COLS.map(c=>c.h); name="flow_of_takeoffs";
     rows=flowRows().map(r=>FLOW_COLS.map(c=>c.get?c.get(r):(c.calc?fmtDate(effective(r,c.f)):(c.type==="date"?fmtDate(r[c.f]):r[c.f])))); }
-  else if(state.view==="budgets"){ cols=["Community","Plan","Plan Name","Elev","Estimating Release",...state.cols.map(c=>c.name),"SIM Reviewed","Sent to LOC","Pricing Due","LOC Upload","Tasks Start","Trench Date"]; name="pending_budgets";
-    rows=flowRows().map(r=>{ const st=state.status[r.id]||{}; return [r.community_name,r.plan,planName(r),r.elevation,fmtDate(effective(r,"released")),
+  else if(state.view==="budgets"){ cols=["Community","Community #","Plan","Plan Name","Elev","Estimating Release",...state.cols.map(c=>c.name),"SIM Reviewed","Sent to LOC","Pricing Due","LOC Upload","Tasks Start","Trench Date"]; name="pending_budgets";
+    rows=flowRows().map(r=>{ const st=state.status[r.id]||{}; return [r.community_name,r.community_num,r.plan,planName(r),r.elevation,fmtDate(effective(r,"released")),
       ...state.cols.map(c=>state.checks[r.id+"::"+c.id]?"Y":""), st.sim_reviewed?"Y":"", st.sent_to_loc?"Y":"", fmtDate(workday(r.first_trench_date,-30,true)), fmtDate(effective(r,"loc_upload")), fmtDate(effective(r,"tasks_start")), fmtDate(r.first_trench_date)]; }); }
   else if(state.view==="changes"){ cols=CHG_COLS.map(c=>c.h); name="takeoff_changes";
     rows=chgRows().map(r=>CHG_COLS.map(c=>c.type==="check"?(r[c.f]?"Y":""):(c.type==="date"?fmtDate(r[c.f]):r[c.f]))); }
