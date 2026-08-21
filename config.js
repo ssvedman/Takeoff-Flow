@@ -65,12 +65,5 @@ window.APP_CONFIG = {
 
   // Default set of people-columns created on the Pending Budgets tab for a brand
   // new division. Editors can add/remove/rename these and bind each to an email.
-  DEFAULT_BUDGET_COLUMNS: ["Jennifer", "Erik", "Grant", "Sandy", "Daysi", "Steve"],
-
-  // Anti-abuse: per-browser limits on requesting a login code.
-  // These apply once Supabase is connected; they're auto-bypassed in DEMO/test mode.
-  OTP_LIMITS: { cooldownSec: 45, perHour: 5, perDay: 15 },
-
-  // Demo verification code used only when Supabase is not configured.
-  DEMO_CODE: "123456"
+  DEFAULT_BUDGET_COLUMNS: ["Jennifer", "Erik", "Grant", "Sandy", "Daysi", "Steve"]
 };

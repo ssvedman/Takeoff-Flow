@@ -34,7 +34,7 @@ const MEM = { app_roles:[], flow_rows:[], pending_budget_cols:[], pending_budget
 
 /* ---------------- helpers ---------------- */
 const $   = id => document.getElementById(id);
-const esc = s => String(s==null?"":s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const esc = s => String(s==null?"":s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : "id-"+Date.now()+"-"+Math.random().toString(16).slice(2));
 const lc  = s => (s||"").toLowerCase().trim();
 const todayIso = () => new Date().toISOString().slice(0,10);
