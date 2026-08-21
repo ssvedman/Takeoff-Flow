@@ -308,10 +308,13 @@ async function saveField(table, id, field, newVal, oldVal){
   toast("Not saved — this cell was just changed"+who+". Showing the latest value; re-enter your change to keep it.","err");
   return {ok:false, current};
 }
+/* savePatch / saveCheck / saveStatus / saveSentToLoc return true on success, false when the
+   write was refused (RLS, network) so an optimistic caller can put the UI back. */
 async function savePatch(table, id, patch){
   const body={ ...patch, updated_at:new Date().toISOString(), updated_by:state.email };
-  if(DEMO){ const row=(MEM[table]||[]).find(x=>x.id===id); if(row) Object.assign(row,body); return; }
-  const { error } = await sb.from(table).update(body).eq("id",id); if(error){ console.error(error); toast("Save failed: "+error.message,"err"); }
+  if(DEMO){ const row=(MEM[table]||[]).find(x=>x.id===id); if(row) Object.assign(row,body); return true; }
+  const { error } = await sb.from(table).update(body).eq("id",id); if(error){ console.error(error); toast("Save failed: "+error.message,"err"); return false; }
+  return true;
 }
 
 /* ---- Undo (Flow tab): reverses THIS browser's recent Flow edits, newest first.
@@ -333,21 +336,24 @@ async function deleteRow(table, id){
 }
 async function saveCheck(flow_id, col_id, checked){
   const row={ flow_id, col_id, checked, updated_by:state.email, updated_at:new Date().toISOString() };
-  if(DEMO){ const a=MEM.pending_budget_checks; const i=a.findIndex(x=>x.flow_id===flow_id&&x.col_id===col_id); if(i>=0)a[i]=row; else a.push(row); return; }
-  const { error } = await sb.from("pending_budget_checks").upsert(row,{ onConflict:"flow_id,col_id" }); if(error) toast("Save failed: "+error.message,"err");
+  if(DEMO){ const a=MEM.pending_budget_checks; const i=a.findIndex(x=>x.flow_id===flow_id&&x.col_id===col_id); if(i>=0)a[i]=row; else a.push(row); return true; }
+  const { error } = await sb.from("pending_budget_checks").upsert(row,{ onConflict:"flow_id,col_id" }); if(error){ toast("Save failed: "+error.message,"err"); return false; }
+  return true;
 }
 async function saveStatus(flow_id, patch){
   const cur=state.status[flow_id]||{sim_reviewed:false,sent_to_loc:false};
   const row={ flow_id, sim_reviewed:cur.sim_reviewed, sent_to_loc:cur.sent_to_loc, ...patch, updated_by:state.email, updated_at:new Date().toISOString() };
   state.status[flow_id]={sim_reviewed:row.sim_reviewed, sent_to_loc:row.sent_to_loc};
-  if(DEMO){ const a=MEM.pending_budget_status; const i=a.findIndex(x=>x.flow_id===flow_id); if(i>=0)a[i]=row; else a.push(row); return; }
-  const { error } = await sb.from("pending_budget_status").upsert(row,{ onConflict:"flow_id" }); if(error) toast("Save failed: "+error.message,"err");
+  if(DEMO){ const a=MEM.pending_budget_status; const i=a.findIndex(x=>x.flow_id===flow_id); if(i>=0)a[i]=row; else a.push(row); return true; }
+  const { error } = await sb.from("pending_budget_status").upsert(row,{ onConflict:"flow_id" }); if(error){ toast("Save failed: "+error.message,"err"); return false; }
+  return true;
 }
 /* Sent-to-LOC toggles go through an RPC that enforces the per-division lock server-side
    (and only ever touches sent_to_loc, so sim_reviewed stays editor-only). */
 async function saveSentToLoc(flow_id, val){
-  if(DEMO){ const a=MEM.pending_budget_status; const i=a.findIndex(x=>x.flow_id===flow_id); if(i>=0)a[i].sent_to_loc=val; else a.push({flow_id,sim_reviewed:false,sent_to_loc:val}); return; }
-  const { error } = await sb.rpc("tf_set_sent_to_loc",{ p_flow_id:flow_id, p_value:val }); if(error) toast("Save failed: "+error.message,"err");
+  if(DEMO){ const a=MEM.pending_budget_status; const i=a.findIndex(x=>x.flow_id===flow_id); if(i>=0)a[i].sent_to_loc=val; else a.push({flow_id,sim_reviewed:false,sent_to_loc:val}); return true; }
+  const { error } = await sb.rpc("tf_set_sent_to_loc",{ p_flow_id:flow_id, p_value:val }); if(error){ toast("Save failed: "+error.message,"err"); return false; }
+  return true;
 }
 /* Editor/admin sets or clears the user the Sent-to-LOC column is locked to (per division). */
 function openLocLockModal(){
@@ -583,10 +589,16 @@ function renderBudgets(tb,area){
   h+=`</tbody></table></div>`;
   area.innerHTML=h;
   bindHeader(area, cols, flowRows());
-  area.querySelectorAll("[data-chk]").forEach(cb=>cb.onchange=async()=>{ const fid=cb.dataset.chk, cid=cb.dataset.col; state.checks[fid+"::"+cid]=cb.checked; await saveCheck(fid,cid,cb.checked); });
+  // Ticks are optimistic; if the write is refused (RLS, offline) the prior value goes back
+  // into state AND onto the box, so the grid never shows a check the database doesn't have.
+  area.querySelectorAll("[data-chk]").forEach(cb=>cb.onchange=async()=>{ const fid=cb.dataset.chk, cid=cb.dataset.col, key=fid+"::"+cid, prev=!!state.checks[key];
+    state.checks[key]=cb.checked;
+    if(!await saveCheck(fid,cid,cb.checked)){ state.checks[key]=prev; cb.checked=prev; } });
   area.querySelectorAll("[data-st]").forEach(cb=>cb.onchange=async()=>{ const fid=cb.dataset.st, k=cb.dataset.k;
-    if(k==="sent_to_loc"){ const cur=state.status[fid]||{sim_reviewed:false,sent_to_loc:false}; state.status[fid]={sim_reviewed:cur.sim_reviewed, sent_to_loc:cb.checked}; await saveSentToLoc(fid, cb.checked); }
-    else { await saveStatus(fid,{[k]:cb.checked}); } });
+    const prev={...(state.status[fid]||{sim_reviewed:false,sent_to_loc:false})};
+    if(k==="sent_to_loc"){ state.status[fid]={sim_reviewed:prev.sim_reviewed, sent_to_loc:cb.checked};
+      if(!await saveSentToLoc(fid, cb.checked)){ state.status[fid]=prev; cb.checked=prev.sent_to_loc; } }
+    else if(!await saveStatus(fid,{[k]:cb.checked})){ state.status[fid]=prev; cb.checked=prev[k]; } });
   const ll=area.querySelector("[data-loclock]"); if(ll) ll.onclick=(e)=>{ e.stopPropagation(); openLocLockModal(); };
   if(canMng){
     const add=$("addCol"); if(add) add.onclick=()=>openColModal(null);
@@ -656,10 +668,11 @@ async function openColModal(col){
     </div></div>`;
   document.body.appendChild(ov);
   const emailInp=ov.querySelector("#mcEmail");
-  const close=()=>ov.remove();
+  const esc2=e=>{ if(e.key==="Escape") close(); };
+  const close=()=>{ document.removeEventListener("keydown",esc2); ov.remove(); };   // every close path unhooks the key handler, not just Escape
   const mcmsg=t=>{ const m=ov.querySelector("#mcMsg"); m.className="msg err"; m.textContent=t; };
   ov.addEventListener("click",e=>{ if(e.target===ov) close(); });
-  document.addEventListener("keydown",function esc2(e){ if(e.key==="Escape"){ close(); document.removeEventListener("keydown",esc2);} });
+  document.addEventListener("keydown",esc2);
   ov.querySelector("[data-x]").onclick=close;
   ov.querySelector("#mcCancel").onclick=close;
   ov.querySelector("#mcName").focus();
@@ -741,7 +754,11 @@ function renderChanges(tb,area){
   area.innerHTML=h;
   bindGrid(area, saveChgCell);
   bindHeader(area, cols, chgRows());
-  area.querySelectorAll("[data-chgchk]").forEach(cb=>cb.onchange=async()=>{ const r=state.changes.find(x=>x.id===cb.dataset.chgchk); if(!r)return; const f=cb.dataset.f; r[f]=cb.checked; const patch={[f]:cb.checked}; if(f==="complete"){ r.completed_date = cb.checked ? (r.completed_date||todayIso()) : null; patch.completed_date=r.completed_date; } await savePatch("takeoff_changes",r.id,patch); render(); });
+  area.querySelectorAll("[data-chgchk]").forEach(cb=>cb.onchange=async()=>{ const r=state.changes.find(x=>x.id===cb.dataset.chgchk); if(!r)return; const f=cb.dataset.f;
+    const prev=r[f], prevDate=r.completed_date;                     // optimistic: roll back if the write is refused
+    r[f]=cb.checked; const patch={[f]:cb.checked}; if(f==="complete"){ r.completed_date = cb.checked ? (r.completed_date||todayIso()) : null; patch.completed_date=r.completed_date; }
+    if(!await savePatch("takeoff_changes",r.id,patch)){ r[f]=prev; r.completed_date=prevDate; }
+    render(); });
   area.querySelectorAll("[data-delchg]").forEach(b=>b.onclick=async()=>{ if(!confirm("Delete this request?"))return; const id=b.dataset.delchg; await deleteRow("takeoff_changes",id); state.changes=state.changes.filter(x=>x.id!==id); render(); });
   const add=$("addChg"); if(add) add.onclick=async()=>{ const r={ id:uid(), division:state.divKey, req_date:todayIso(), requestor:state.email.split("@")[0], urgent:false, complete:false, created_by:state.email }; state.changes.unshift(r); await saveRow("takeoff_changes",r); render(); };
 }
@@ -1334,8 +1351,15 @@ async function doPaste(txt){ const c=sheet.container; if(!sheet.anchor) return;
   const pr=matrix.length-1, pc=Math.max(...matrix.map(l=>l.split("\t").length))-1;
   sheet.anchor={r:sr,c:sc}; sheet.focus={r:Math.min(R-1,sr+pr),c:Math.min(C-1,sc+pc)};
   await runEdits(collectEdits(cells)); }
+/* The container (#viewArea) outlives every render — only its innerHTML is replaced — so these
+   listeners are wired ONCE and delegate off the live `sheet` model (container/commit/anchor are
+   refreshed by bindGrid on each render). Re-attaching per render stacked a duplicate set every
+   time. The view guard keeps them inert on the tabs that don't use the sheet model. */
 function attachSheetMouse(c){
+  if(c.dataset.sheetWired) return; c.dataset.sheetWired="1";
+  const onSheet=()=>state.view==="flow"||state.view==="changes";
   c.addEventListener("mousedown", e=>{
+    if(!onSheet()) return;
     if(e.target.closest(".fill-handle")){ e.preventDefault(); sheet.fill=true; sheet.fillTo=selRect().r2; return; }
     const cell=e.target.closest(".cell"); if(!cell) return; const co=shCoord(cell); if(!co) return;
     e.preventDefault();
@@ -1343,12 +1367,12 @@ function attachSheetMouse(c){
     paintSelection();
   });
   c.addEventListener("mouseover", e=>{
-    if(!sheet.drag && !sheet.fill) return;
+    if(!onSheet() || (!sheet.drag && !sheet.fill)) return;
     const cell=e.target.closest(".cell"); if(!cell) return; const co=shCoord(cell); if(!co) return;
     if(sheet.fill){ sheet.fillTo=co.r; } else { sheet.focus=co; }
     paintSelection();
   });
-  c.addEventListener("dblclick", e=>{ const cell=e.target.closest(".cell"); if(!cell) return; const co=shCoord(cell); if(co){ sheet.anchor=co; sheet.focus=co; } editActive(); });
+  c.addEventListener("dblclick", e=>{ if(!onSheet()) return; const cell=e.target.closest(".cell"); if(!cell) return; const co=shCoord(cell); if(co){ sheet.anchor=co; sheet.focus=co; } editActive(); });
 }
 function sheetActive(){ return sheet.container && (state.view==="flow"||state.view==="changes") && !isEditingOpen(); }
 function onSheetKey(e){
@@ -1487,6 +1511,17 @@ function bindImport(){
   ["dragover","dragenter"].forEach(ev=>tile.addEventListener(ev,e=>{e.preventDefault();tile.classList.add("drag");}));
   ["dragleave","drop"].forEach(ev=>tile.addEventListener(ev,e=>{e.preventDefault();tile.classList.remove("drag");}));
   tile.addEventListener("drop",e=>{ const f=e.dataTransfer&&e.dataTransfer.files&&e.dataTransfer.files[0]; if(f) loadStartsFile(f); });
+  // The preview (and Publish) is built for ONE division — switching the picker would otherwise
+  // leave a stale preview whose Publish targets the newly-selected division. Drop the file again.
+  $("adminDiv").onchange=()=>resetImportPreview("Division changed — drop the Starts Log again to preview it for this division.");
+}
+/* clear the parsed workbook + preview panel so nothing can be published from stale state */
+function resetImportPreview(note){
+  const had=!!(importState&&importState.wb);
+  importState={ file:null, wb:null };
+  $("previewPanel").classList.add("hidden"); $("previewBody").innerHTML="";
+  $("tileStarts").classList.remove("filled"); $("startsName").textContent="Drop the Starts Log .xlsx here or click to browse";
+  if(note && had) adminMsg(note,"info");
 }
 function adminMsg(t,k){ const m=$("adminMsg"); m.className="msg "+(k||"info"); m.textContent=t; }
 async function loadStartsFile(file){
@@ -1533,7 +1568,9 @@ function parseFlowWorkbook(wb){
 function parseStartSchedule(wb, div){
   const digits=x=>String(x==null?"":x).replace(/\D/g,"");
   const S=s=>(s==null?null:String(s).trim()||null);
-  const xlDate=v=>{ if(v==null||v==="")return null; if(typeof v==="number"){ const d=XLSX.SSF?XLSX.SSF.parse_date_code(v):null; if(d) return `${d.y}-${String(d.m).padStart(2,"0")}-${String(d.d).padStart(2,"0")}`; }
+  const xlDate=v=>{ if(v==null||v==="")return null;
+    if(v instanceof Date && !isNaN(v)) return new Date(Date.UTC(v.getFullYear(),v.getMonth(),v.getDate())).toISOString().slice(0,10);   // cellDates:true gives LOCAL Dates; take the calendar day, not the UTC shift
+    if(typeof v==="number"){ const d=XLSX.SSF?XLSX.SSF.parse_date_code(v):null; if(d) return `${d.y}-${String(d.m).padStart(2,"0")}-${String(d.d).padStart(2,"0")}`; }
     const d=new Date(v); return isNaN(d)?null:d.toISOString().slice(0,10); };
   const find=n=>wb.SheetNames.find(s=>lc(s)===lc(n));
   const want = div==="orlando" ? "Permit Log" : div==="tampa" ? "Start Log" : null;
