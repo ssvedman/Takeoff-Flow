@@ -820,12 +820,72 @@ function renderTodo(tb,area){
    picks the OTHER entity to search by:
      • By community → pick plans; communities that contain ALL picked plans are highlighted + first.
      • By plan      → pick communities; plans present in ALL picked communities are highlighted + first. */
+/* ---- per-(community, plan) release status for the Plans-tab chips ----
+   Aggregates Flow rows by community + plan:
+     green (done) – every elevation has a Released date
+     red   (off)  – not fully released AND no First Trench date today or later
+                    (the plan doesn't appear on the start log going forward)
+     yellow(part) – some elevations released, more starts coming
+     blue  (none) – nothing released yet, starts coming            */
+function planStatusIndex(){
+  const idx=new Map(); const today=todayIso();
+  state.flow.forEach(r=>{
+    const ck=(r.community_num||r.community_name); if(!ck||!r.plan) return;
+    const key=String(ck)+"|"+lc(String(r.plan));
+    let e=idx.get(key); if(!e){ e={evs:new Map(), future:false}; idx.set(key,e); }
+    const evKey=lc(r.elevation||"");
+    let ev=e.evs.get(evKey); if(!ev){ ev={label:String(r.elevation||"").trim(), released:null, trench:null}; e.evs.set(evKey,ev); }
+    const rel=effective(r,"released"); if(rel && (!ev.released || rel<ev.released)) ev.released=rel;
+    const tr=r.first_trench_date||null; if(tr && (!ev.trench || tr<ev.trench)) ev.trench=tr;
+    if(tr && tr>=today) e.future=true;
+  });
+  idx.forEach(e=>{
+    const evs=[...e.evs.values()].sort((a,b)=>a.label.localeCompare(b.label,undefined,{numeric:true}));
+    e.list=evs; e.total=evs.length; e.done=evs.filter(v=>v.released).length;
+    e.status = (e.total && e.done===e.total) ? "done" : !e.future ? "off" : e.done>0 ? "part" : "none";
+  });
+  return idx;
+}
+const PLAN_ST_LABEL={ done:"All elevations released", part:"Some elevations released",
+  none:"Nothing released yet", off:"Not on the start log from today forward" };
+function planTipHTML(entry, plan, planNm, commName){
+  const head=`${esc(plan)}${planNm?` — ${esc(planNm)}`:""}`;
+  const st=entry.status;
+  const stLine=`${PLAN_ST_LABEL[st]}${entry.total?` · ${entry.done} of ${entry.total} released`:""}`;
+  const rows=entry.list.map(ev=>{
+    const right = ev.released ? `Released ${esc(fmtDate(ev.released))}`
+      : `Pending${ev.trench?` · trench ${esc(fmtDate(ev.trench))}`:""}`;
+    return `<div class="chip-tip-ev"><span class="chip-tip-evl">${esc(ev.label||"—")}</span><span class="chip-tip-evr ${ev.released?"ok":"pend"}">${right}</span></div>`;
+  }).join("");
+  return `<div class="chip-tip-h">${head}</div>`
+    + (commName?`<div class="chip-tip-c">${esc(commName)}</div>`:"")
+    + `<div class="chip-tip-st st-${st}">${stLine}</div>${rows}`;
+}
+function attachChipTips(container, idx){
+  let tip=$("chipTip");
+  const hide=()=>tip.classList.add("hidden");
+  if(!tip){ tip=document.createElement("div"); tip.id="chipTip"; tip.className="chip-tip hidden"; document.body.appendChild(tip);
+    window.addEventListener("scroll",()=>tip.classList.add("hidden"),{passive:true}); }
+  container.addEventListener("mouseover",e=>{
+    const ch=e.target.closest(".chip[data-ttc]"); if(!ch) return;
+    const entry=idx.get(ch.dataset.ttc+"|"+lc(ch.dataset.ttp)); if(!entry) return;
+    tip.innerHTML=planTipHTML(entry, ch.dataset.ttp, ch.dataset.ttn||"", ch.dataset.ttx||"");
+    tip.classList.remove("hidden");
+    const r=ch.getBoundingClientRect(), tw=tip.offsetWidth, th=tip.offsetHeight;
+    let x=r.left+r.width/2-tw/2; x=Math.max(8,Math.min(x,window.innerWidth-tw-8));
+    let y=r.top-th-8; if(y<8) y=r.bottom+8;
+    tip.style.left=x+"px"; tip.style.top=y+"px";
+  });
+  container.addEventListener("mouseout",e=>{ if(e.target.closest(".chip[data-ttc]")) hide(); });
+}
 function renderPlans(tb,area){
   const mode = state.plansMode || "community";
   const pnm = (planLookup()[state.divKey])||{};
   const nameOf = pl => pnm[String(pl==null?"":pl).trim().toUpperCase()] || "";
   const mkBtn=(m,label)=>`<button class="btn mini ${mode===m?"":"ghost"}" data-pmode="${m}">${label}</button>`;
   if(!Array.isArray(state.plansSel)) state.plansSel=[];
+  const psIdx=planStatusIndex();
+  const stOf=(ck,p)=>{ const en=psIdx.get(String(ck)+"|"+lc(String(p))); return en?en.status:"none"; };
 
   // Aggregate. items = the cards; each carries a `set` of the OTHER entity it contains.
   // options = the pickable universe of that other entity.
@@ -833,13 +893,13 @@ function renderPlans(tb,area){
   if(mode==="community"){
     const byComm=new Map();
     state.flow.forEach(r=>{ const key=(r.community_num||r.community_name); if(!key||!r.plan) return;
-      let e=byComm.get(key); if(!e){ e={name:r.community_name||"", num:r.community_num||"", plans:new Set() }; byComm.set(key,e); } e.plans.add(String(r.plan)); });
+      let e=byComm.get(key); if(!e){ e={ck:String(key), name:r.community_name||"", num:r.community_num||"", plans:new Set() }; byComm.set(key,e); } e.plans.add(String(r.plan)); });
     [...byComm.values()].sort((a,b)=>String(a.name).localeCompare(String(b.name))).forEach(e=>{
       const plans=[...e.plans].sort((a,b)=>a.localeCompare(b,undefined,{numeric:true}));
       plans.forEach(p=>{ if(!optMap.has(p)) optMap.set(p, nameOf(p)?`${p} — ${nameOf(p)}`:p); });
       items.push({ set:e.plans, name:e.name,
         card:(hi)=>`<div class="pl-card"><div class="pl-card-h">${esc(e.name)} <span class="pl-sub">${esc(e.num||"")} · ${plans.length} plan${plans.length===1?"":"s"}</span></div>
-          <div class="pl-chips">${plans.map(p=>{ const nm=nameOf(p), on=hi&&hi.has(p); return `<span class="chip${on?" chip-hit":""}" ${nm?`title="${esc(nm)}"`:""}>${esc(p)}${nm?` <span class="pl-nm">${esc(nm)}</span>`:""}</span>`; }).join("")}</div></div>` });
+          <div class="pl-chips">${plans.map(p=>{ const nm=nameOf(p), on=hi&&hi.has(p); return `<span class="chip chip-st-${stOf(e.ck,p)}${on?" chip-hit":""}" data-ttc="${esc(e.ck)}" data-ttp="${esc(p)}" data-ttn="${esc(nm)}" data-ttx="${esc(e.name)}">${esc(p)}${nm?` <span class="pl-nm">${esc(nm)}</span>`:""}</span>`; }).join("")}</div></div>` });
     });
   } else {
     const byPlan=new Map();
@@ -851,7 +911,7 @@ function renderPlans(tb,area){
       const comms=[...e.comms.entries()].sort((a,b)=>String(a[1]).localeCompare(String(b[1]))); const nm=nameOf(e.plan);
       items.push({ set:keys, name:e.plan,
         card:(hi)=>`<div class="pl-card"><div class="pl-card-h">${esc(e.plan)}${nm?` <span class="pl-nm">${esc(nm)}</span>`:""} <span class="pl-sub">${comms.length} communit${comms.length===1?"y":"ies"}</span></div>
-          <div class="pl-chips">${comms.map(([k,cn])=>{ const on=hi&&hi.has(k); return `<span class="chip${on?" chip-hit":""}">${esc(cn||k)}</span>`; }).join("")}</div></div>` });
+          <div class="pl-chips">${comms.map(([k,cn])=>{ const on=hi&&hi.has(k); return `<span class="chip chip-st-${stOf(k,e.plan)}${on?" chip-hit":""}" data-ttc="${esc(k)}" data-ttp="${esc(e.plan)}" data-ttn="${esc(nm)}" data-ttx="${esc(cn||k)}">${esc(cn||k)}</span>`; }).join("")}</div></div>` });
     });
   }
   const options=[...optMap.entries()].map(([value,label])=>({value,label,search:lc(value+" "+label)}))
@@ -873,7 +933,14 @@ function renderPlans(tb,area){
     + `<button class="btn mini ghost" data-export>&#8681; Export CSV</button>`
     + `<span class="grow"></span>`
     + `<span class="section-note" style="margin:0">Pick ${pickNoun} from the dropdown to filter. Choose 2+ and the ${noun(2)} containing <b>all</b> of them are highlighted and listed first. Current division only.</span>`;
-  area.innerHTML=`<div class="pl-list"></div>`;
+  area.innerHTML=`<div class="pl-legend"><span class="pl-legend-t">Release status:</span>
+      <span class="chip chip-st-none">Nothing released</span>
+      <span class="chip chip-st-part">Some elevations released</span>
+      <span class="chip chip-st-done">All elevations released</span>
+      <span class="chip chip-st-off">Not on start log (today &rarr;)</span>
+      <span class="pl-legend-t" style="margin-left:6px">Hover a chip for elevation detail.</span></div>
+    <div class="pl-list"></div>`;
+  attachChipTips(area, psIdx);
 
   const panel=$("plDdPanel"), search=$("plDdSearch"), listEl=$("plDdList");
   const boxes=()=>[...listEl.querySelectorAll("input[type=checkbox]")];
