@@ -822,9 +822,11 @@ function renderTodo(tb,area){
      • By plan      → pick communities; plans present in ALL picked communities are highlighted + first. */
 /* ---- per-(community, plan) release status for the Plans-tab chips ----
    Aggregates Flow rows by community + plan:
-     green (done) – every elevation has a Released date
-     red   (off)  – not fully released AND no First Trench date today or later
-                    (the plan doesn't appear on the start log going forward)
+     red   (off)  – no First Trench date today or later (the plan doesn't appear
+                    on the start log going forward — e.g. removed from the
+                    community). Red is the most dominant status: it wins even
+                    over fully released.
+     green (done) – every elevation has a Released date (and starts coming)
      yellow(part) – some elevations released, more starts coming
      blue  (none) – nothing released yet, starts coming            */
 function planStatusIndex(){
@@ -842,7 +844,7 @@ function planStatusIndex(){
   idx.forEach(e=>{
     const evs=[...e.evs.values()].sort((a,b)=>a.label.localeCompare(b.label,undefined,{numeric:true}));
     e.list=evs; e.total=evs.length; e.done=evs.filter(v=>v.released).length;
-    e.status = (e.total && e.done===e.total) ? "done" : !e.future ? "off" : e.done>0 ? "part" : "none";
+    e.status = !e.future ? "off" : (e.total && e.done===e.total) ? "done" : e.done>0 ? "part" : "none";
   });
   return idx;
 }
