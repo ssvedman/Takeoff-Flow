@@ -822,29 +822,37 @@ function renderTodo(tb,area){
      • By plan      → pick communities; plans present in ALL picked communities are highlighted + first. */
 /* ---- per-(community, plan) release status for the Plans-tab chips ----
    Aggregates Flow rows by community + plan:
-     red   (off)  – no First Trench date today or later (the plan doesn't appear
-                    on the start log going forward — e.g. removed from the
-                    community). Red is the most dominant status: it wins even
-                    over fully released.
-     green (done) – every elevation has a Released date (and starts coming)
-     yellow(part) – some elevations released, more starts coming
-     blue  (none) – nothing released yet, starts coming            */
+     red   (off)  – the plan has no start on the start log from today forward
+                    (e.g. removed from the community). Red is the most dominant
+                    status: it wins even over fully released.
+     green (done) – every elevation has a Released date
+     yellow(part) – some elevations released
+     blue  (none) – nothing released yet
+   "On the start log going forward" comes from last_trench_date — the LATEST
+   start seen for the combo in the most recent Starts Log import. (The row's
+   first_trench_date is the EARLIEST-ever start, so it goes stale for any plan
+   that began building months ago and must not drive red on its own.) Until a
+   Starts Log import has stamped last_trench_date for the division, we can't
+   tell who dropped off the log, so nothing is flagged red.               */
 function planStatusIndex(){
   const idx=new Map(); const today=todayIso();
+  const hasLast=state.flow.some(r=>r.last_trench_date);   // has any Starts Log import stamped latest starts yet?
   state.flow.forEach(r=>{
     const ck=(r.community_num||r.community_name); if(!ck||!r.plan) return;
     const key=String(ck)+"|"+lc(String(r.plan));
-    let e=idx.get(key); if(!e){ e={evs:new Map(), future:false}; idx.set(key,e); }
+    let e=idx.get(key); if(!e){ e={evs:new Map(), future:false, lastStart:null}; idx.set(key,e); }
     const evKey=lc(r.elevation||"");
     let ev=e.evs.get(evKey); if(!ev){ ev={label:String(r.elevation||"").trim(), released:null, trench:null}; e.evs.set(evKey,ev); }
     const rel=effective(r,"released"); if(rel && (!ev.released || rel<ev.released)) ev.released=rel;
     const tr=r.first_trench_date||null; if(tr && (!ev.trench || tr<ev.trench)) ev.trench=tr;
-    if(tr && tr>=today) e.future=true;
+    const last=r.last_trench_date||null; if(last && (!e.lastStart || last>e.lastStart)) e.lastStart=last;
+    if((tr && tr>=today) || (last && last>=today)) e.future=true;
   });
   idx.forEach(e=>{
     const evs=[...e.evs.values()].sort((a,b)=>a.label.localeCompare(b.label,undefined,{numeric:true}));
     e.list=evs; e.total=evs.length; e.done=evs.filter(v=>v.released).length;
-    e.status = !e.future ? "off" : (e.total && e.done===e.total) ? "done" : e.done>0 ? "part" : "none";
+    const onLog = e.future || !hasLast;   // no latest-start data yet → can't call anything "off the log"
+    e.status = !onLog ? "off" : (e.total && e.done===e.total) ? "done" : e.done>0 ? "part" : "none";
   });
   return idx;
 }
@@ -853,7 +861,7 @@ const PLAN_ST_LABEL={ done:"All elevations released", part:"Some elevations rele
 function planTipHTML(entry, plan, planNm, commName){
   const head=`${esc(plan)}${planNm?` — ${esc(planNm)}`:""}`;
   const st=entry.status;
-  const stLine=`${PLAN_ST_LABEL[st]}${entry.total?` · ${entry.done} of ${entry.total} released`:""}`;
+  const stLine=`${PLAN_ST_LABEL[st]}${entry.total?` · ${entry.done} of ${entry.total} released`:""}${st==="off"&&entry.lastStart?` · last start ${esc(fmtDate(entry.lastStart))}`:""}`;
   const rows=entry.list.map(ev=>{
     const right = ev.released ? `Released ${esc(fmtDate(ev.released))}`
       : `Pending${ev.trench?` · trench ${esc(fmtDate(ev.trench))}`:""}`;
@@ -939,7 +947,7 @@ function renderPlans(tb,area){
       <span class="chip chip-st-none">Nothing released</span>
       <span class="chip chip-st-part">Some elevations released</span>
       <span class="chip chip-st-done">All elevations released</span>
-      <span class="chip chip-st-off">Not on start log (today &rarr;)</span>
+      <span class="chip chip-st-off" title="Judged from the latest start date seen in the most recent Starts Log import">Not on start log (today &rarr;)</span>
       <span class="pl-legend-t" style="margin-left:6px">Hover a chip for elevation detail.</span></div>
     <div class="pl-list"></div>`;
   attachChipTips(area, psIdx);
@@ -1679,8 +1687,10 @@ function parseStartSchedule(wb, div){
     const name = comm || idName[num] || num;
     if(!num || !plan) continue;
     const add=(planLabel, evv)=>{ if(!planLabel) return; const key=[num,lc(planLabel),lc(evv||"")].join("|");
-      if(!groups.has(key)) groups.set(key,{ community_name:name, community_num:num, plan:planLabel, elevation:evv, first_trench_date:trench });
-      else{ const g=groups.get(key); if(trench && (!g.first_trench_date || trench<g.first_trench_date)) g.first_trench_date=trench; } };
+      if(!groups.has(key)) groups.set(key,{ community_name:name, community_num:num, plan:planLabel, elevation:evv, first_trench_date:trench, last_trench_date:trench });
+      else{ const g=groups.get(key); if(trench){
+        if(!g.first_trench_date || trench<g.first_trench_date) g.first_trench_date=trench;
+        if(!g.last_trench_date  || trench>g.last_trench_date ) g.last_trench_date =trench; } } };
     add(plan, ev);                            // the plex ("{N}-PLEX") line, or a normal home line
     if(bp && srcPlan && lc(srcPlan)!==lc(plan)) add(srcPlan, ev);   // ALSO a separate line for each plan in the plex
   }
@@ -1730,19 +1740,29 @@ async function buildImportPreview(){
   const freshSet=new Set(fresh), agg=new Map();
   if(!isFlow) proposed.forEach(p=>{ if(freshSet.has(p)) return; const r=findExisting(p); if(!r) return;
     const nt=p.first_trench_date; if(!nt) return;
-    const cur=agg.get(r.id); if(!cur){ agg.set(r.id,{row:r, earliest:nt}); } else if(nt<cur.earliest){ cur.earliest=nt; } });
+    const lt=p.last_trench_date||nt;
+    let cur=agg.get(r.id);
+    if(!cur){ agg.set(r.id,{row:r, earliest:nt, latest:lt}); }
+    else{ if(nt<cur.earliest) cur.earliest=nt; if(lt>cur.latest) cur.latest=lt; } });
   const updates=[];
-  agg.forEach(({row:r, earliest})=>{ if(earliest!==(r.first_trench_date||null))
-    updates.push({ id:r.id, community_name:numName[String(r.community_num||"").trim()]||r.community_name, community_num:r.community_num, plan:r.plan, elevation:r.elevation||"", trFrom:r.first_trench_date||"", trTo:earliest }); });
+  // last_trench_date mirrors the CURRENT log's latest start per row (may move backward
+  // when future lots are dropped). It drives the red status on the Plans tab.
+  const lastUpd=new Map();
+  agg.forEach(({row:r, earliest, latest})=>{
+    if(earliest!==(r.first_trench_date||null))
+      updates.push({ id:r.id, community_name:numName[String(r.community_num||"").trim()]||r.community_name, community_num:r.community_num, plan:r.plan, elevation:r.elevation||"", trFrom:r.first_trench_date||"", trTo:earliest });
+    if(latest && latest!==(r.last_trench_date||null)) lastUpd.set(r.id, latest);
+  });
   const panel=$("previewPanel"), body=$("previewBody");
   panel.classList.remove("hidden");
   const src=isFlow?"FLOW OF TAKEOFFS workbook":"Starts Log";
-  if(!fresh.length && !updates.length){ body.innerHTML=`<p class="tiny" style="text-align:left">Parsed ${proposed.length} combination(s) from the ${src} — nothing new to add and nothing changed in ${esc(div)}.</p>`; return; }
+  if(!fresh.length && !updates.length && !lastUpd.size){ body.innerHTML=`<p class="tiny" style="text-align:left">Parsed ${proposed.length} combination(s) from the ${src} — nothing new to add and nothing changed in ${esc(div)}.</p>`; return; }
   // ---- change summary ----
   const byComm=new Map();
   fresh.forEach(r=>byComm.set(r.community_name,(byComm.get(r.community_name)||0)+1));
   const newComms=[...new Set(fresh.filter(p=>!existingNums.has(String(p.community_num||"").trim())).map(p=>p.community_name))];
   const sumParts=[]; if(fresh.length) sumParts.push(`${fresh.length} new row(s)`); if(updates.length) sumParts.push(`${updates.length} trench update(s)`);
+  if(lastUpd.size) sumParts.push(`${lastUpd.size} latest-start refresh(es)`);
   importState.summary=`Imported ${sumParts.join(" + ")} from ${src} → ${div}${byComm.size?` · ${byComm.size} communities`:""}${newComms.length?`, ${newComms.length} new`:""}`;
   importState.detail={ source:src, division:div, communities:byComm.size, newCommunities:newComms,
     added:fresh.map(r=>({community:r.community_name, plan:r.plan, elevation:r.elevation||"", trench:r.first_trench_date||""})),
@@ -1754,6 +1774,7 @@ async function buildImportPreview(){
     <div class="tiny" style="text-align:left;margin:2px 0 0">${proposed.length} parsed · ${proposed.length-fresh.length} already exist${newComms.length?` · <b>${newComms.length} new communities</b>`:""}</div>
     ${newComms.length?`<div class="tiny" style="text-align:left;margin:6px 0 0">New communities: ${newComms.slice(0,12).map(esc).join(", ")}${newComms.length>12?` +${newComms.length-12} more`:""}</div>`:""}
     <div class="tiny" style="text-align:left;margin:6px 0 0">Each plex building adds an N-PLEX line <b>plus a line for every plan in it</b> (e.g. H009, N122). Existing rows are only changed when the earliest First Trench date moved (below).</div>
+    ${lastUpd.size?`<div class="tiny" style="text-align:left;margin:6px 0 0">Also refreshes the <b>latest start date</b> on ${lastUpd.size} matched row(s) — this is what marks a plan red on the Plans tab when it has no starts from today forward.</div>`:""}
   </div>`;
   if(fresh.length){
     h+=`<div class="tiny" style="text-align:left;font-weight:700;margin:10px 0 4px">New rows to add</div>`;
@@ -1769,14 +1790,14 @@ async function buildImportPreview(){
     h+=`</tbody></table></div>`;
     if(updates.length>200) h+=`<p class="tiny" style="text-align:left">…and ${updates.length-200} more.</p>`;
   }
-  const btnLabel=[fresh.length?`add ${fresh.length} row(s)`:"", updates.length?`update ${updates.length} row(s)`:""].filter(Boolean).join(" & ");
+  const btnLabel=[fresh.length?`add ${fresh.length} row(s)`:"", updates.length?`update ${updates.length} row(s)`:"", (!fresh.length&&!updates.length&&lastUpd.size)?`refresh ${lastUpd.size} latest-start date(s)`:""].filter(Boolean).join(" & ");
   h+=`<button class="btn" id="publishImport">Publish — ${btnLabel} to ${esc(div)}</button>`;
   body.innerHTML=h;
-  $("publishImport").onclick=async()=>{ await publishImport(div, fresh, updates, importState.summary, importState.detail); };
+  $("publishImport").onclick=async()=>{ await publishImport(div, fresh, updates, lastUpd, importState.summary, importState.detail); };
 }
 async function existingFlow(div){
   if(DEMO) return MEM.flow_rows.filter(r=>r.division===div);
-  return await sbAll(()=>sb.from("flow_rows").select("id,community_name,community_num,plan,elevation,first_trench_date,plan_name,sort_order").eq("division",div));
+  return await sbAll(()=>sb.from("flow_rows").select("id,community_name,community_num,plan,elevation,first_trench_date,last_trench_date,plan_name,sort_order").eq("division",div));
 }
 /* One request per 500 rows instead of one per row. `op` is "insert" or "upsert". */
 async function sbBulk(op, table, rows, extra){
@@ -1787,7 +1808,7 @@ async function sbBulk(op, table, rows, extra){
     if(error){ console.error(error); throw error; }
   }
 }
-async function publishImport(div, fresh, updates, summary, detail){
+async function publishImport(div, fresh, updates, lastUpd, summary, detail){
   $("publishImport").disabled=true; adminMsg("Publishing…","info");
   try{
     const existRows=await existingFlow(div);
@@ -1799,12 +1820,13 @@ async function publishImport(div, fresh, updates, summary, detail){
     // partial upsert for existing-row changes: id + division (NOT NULL) + only the changed
     // fields (First Trench and/or plex plan list). One row per id so the batch never
     // touches the same row twice.
-    const byId=new Map(); (updates||[]).forEach(u=>byId.set(u.id,u));
+    const byId=new Map(); (updates||[]).forEach(u=>byId.set(u.id,{id:u.id, trTo:u.trTo}));
+    if(lastUpd) lastUpd.forEach((lt,id)=>{ const cur=byId.get(id)||{id}; cur.lastTo=lt; byId.set(id,cur); });
     const updRows=[...byId.values()].map(u=>{ const row={ id:u.id, division:div, updated_at:now, updated_by:state.email };
-      if(u.trTo) row.first_trench_date=u.trTo; return row; });
+      if(u.trTo) row.first_trench_date=u.trTo; if(u.lastTo) row.last_trench_date=u.lastTo; return row; });
     if(DEMO){
       newRows.forEach(r=>MEM.flow_rows.push(r));
-      updRows.forEach(d=>{ const r=MEM.flow_rows.find(x=>x.id===d.id); if(r){ if(d.first_trench_date!==undefined) r.first_trench_date=d.first_trench_date; if(d.plan_name!==undefined) r.plan_name=d.plan_name; } });
+      updRows.forEach(d=>{ const r=MEM.flow_rows.find(x=>x.id===d.id); if(r){ if(d.first_trench_date!==undefined) r.first_trench_date=d.first_trench_date; if(d.last_trench_date!==undefined) r.last_trench_date=d.last_trench_date; if(d.plan_name!==undefined) r.plan_name=d.plan_name; } });
     }else{
       if(newRows.length) await sbBulk("insert","flow_rows",newRows);            // one call per 500 new rows
       if(updRows.length) await sbBulk("upsert","flow_rows",updRows,{onConflict:"id"});  // one call per 500 row updates
