@@ -98,12 +98,17 @@ function savePrefs(){
     for(const f in m){ if(m[f] instanceof Set) out[f]=[...m[f]]; }
     if(Object.keys(out).length) cf[v]=out;
   }
-  try{ localStorage.setItem(prefsKey(), JSON.stringify({ divKey:state.divKey, view:state.view, sort:state.sort, colFilters:cf })); }catch(e){}
+  // Frequency tab: remember the date basis and range, but NOT the community/plan
+  // picks — those are a momentary drill-down and shouldn't silently narrow the
+  // report the next time the tab is opened.
+  const fq=state.freq ? { basis:state.freq.basis, from:state.freq.from, to:state.freq.to } : null;
+  try{ localStorage.setItem(prefsKey(), JSON.stringify({ divKey:state.divKey, view:state.view, sort:state.sort, colFilters:cf, freq:fq })); }catch(e){}
 }
 function applyPrefs(){
   const p=loadPrefs();
   if(p.divKey && CFG.DIVISIONS.some(d=>d.key===p.divKey)) state.divKey=p.divKey;
-  if(["flow","budgets","changes","todo","plans"].includes(p.view)) state.view=p.view;
+  if(["flow","budgets","changes","todo","plans","freq"].includes(p.view)) state.view=p.view;
+  if(p.freq && typeof p.freq==="object"){ state.freq=Object.assign(freqState(), p.freq); freqState(); }
   if(p.sort && typeof p.sort==="object") state.sort=p.sort;
   if(p.colFilters && typeof p.colFilters==="object"){
     const cf={};
@@ -439,6 +444,7 @@ function render(){
   else if(state.view==="changes") renderChanges(tb,area);
   else if(state.view==="todo")    renderTodo(tb,area);
   else if(state.view==="plans")   renderPlans(tb,area);
+  else if(state.view==="freq")    renderFreq(tb,area);
   area.querySelectorAll(".grid-wrap").forEach((el,i)=>{ if(sc[i]){ el.scrollLeft=sc[i][0]; el.scrollTop=sc[i][1]; } });
   tb.querySelectorAll("[data-export]").forEach(b=>b.onclick=exportCSV);
   tb.querySelectorAll("[data-clearfilters]").forEach(b=>{ b.onclick=clearViewFilters; b.disabled=!anyFilters(); });
@@ -1003,6 +1009,260 @@ function renderPlans(tb,area){
   paint(); syncMaster();
 }
 
+/* ===================================================================
+   TAB 6 · FREQUENCY  (how often each plan comes up in a date range)
+   ===================================================================
+   IMPORTANT — what is being counted.
+   flow_rows stores ONE row per community + plan + elevation combination,
+   with the EARLIEST (first_trench_date) and LATEST (last_trench_date) start
+   seen for that combination in the most recent Starts Log import. Individual
+   lots/starts are collapsed away at import time and are NOT in the database.
+
+   So "frequency" here = the number of community/elevation combinations a plan
+   has whose date falls in the selected range — i.e. how often the plan comes
+   up as work, NOT how many homes were started. If a true homes-started count
+   is ever needed, the Starts Log import has to persist per-lot rows (a new
+   tf_plan_starts table) and this tab can be repointed at it; the aggregation
+   below is deliberately isolated in freqData() to make that a one-function
+   change (Blueprint's import workflow would have to move in lockstep).      */
+
+const FREQ_BASES = [
+  { v:"trench",   label:"First trench (earliest start)" },
+  { v:"last",     label:"Latest start" },
+  { v:"activity", label:"Any start activity in range" },
+  { v:"released", label:"Released date" }
+];
+const FREQ_BASIS_NOTE = {
+  trench:  "Counts a plan/elevation once when its <b>earliest</b> start falls in the range — new work entering the pipeline.",
+  last:    "Counts a plan/elevation once when its <b>latest</b> start falls in the range — where the plan is still starting today.",
+  activity:"Counts a plan/elevation when its start window (earliest &rarr; latest) <b>overlaps</b> the range — anything active at any point in it.",
+  released:"Counts a plan/elevation once when its <b>Released</b> date falls in the range — estimating throughput rather than build activity."
+};
+const FREQ_CHART_CAP = 25;   // bars drawn before the "show all" toggle
+
+function freqShift(n){ const d=parseIso(todayIso()); d.setUTCDate(d.getUTCDate()+n); return iso(d); }
+function freqPresets(){
+  const y=new Date().getUTCFullYear();
+  return [
+    { v:"year", label:"This year",      from:`${y}-01-01`,  to:`${y}-12-31` },
+    { v:"l12",  label:"Last 12 months", from:freqShift(-365), to:todayIso() },
+    { v:"l90",  label:"Last 90 days",   from:freqShift(-90),  to:todayIso() },
+    { v:"n180", label:"Next 6 months",  from:todayIso(),      to:freqShift(180) },
+    { v:"all",  label:"All dates",      from:"",              to:"" }
+  ];
+}
+function freqState(){
+  if(!state.freq){ const y=new Date().getUTCFullYear();
+    state.freq={ basis:"trench", from:`${y}-01-01`, to:`${y}-12-31`, comms:[], plans:[], showAll:false }; }
+  const f=state.freq;
+  if(!FREQ_BASES.some(b=>b.v===f.basis)) f.basis="trench";
+  if(!Array.isArray(f.comms)) f.comms=[];
+  if(!Array.isArray(f.plans)) f.plans=[];
+  return f;
+}
+/* does this flow row fall inside [from,to] under the chosen date basis? */
+function freqInRange(r, basis, from, to){
+  const within = d => !!d && (!from || d>=from) && (!to || d<=to);
+  if(basis==="released") return within(effective(r,"released"));
+  if(basis==="last")     return within(r.last_trench_date);
+  if(basis==="activity"){
+    const lo=r.first_trench_date||r.last_trench_date, hi=r.last_trench_date||r.first_trench_date;
+    if(!lo && !hi) return false;
+    return (!to || lo<=to) && (!from || hi>=from);
+  }
+  return within(r.first_trench_date);
+}
+/* stable per-community colour so a community keeps its shade across renders */
+function freqColor(key){
+  let h=0; const s=String(key);
+  for(let i=0;i<s.length;i++) h=(h*31+s.charCodeAt(i))>>>0;
+  const dark=document.documentElement.getAttribute("data-theme")==="dark";
+  return `hsl(${h%360} ${52+(h>>9)%20}% ${dark?58:44}%)`;
+}
+/* ---- aggregation: current division's flow rows → per-plan counts, split by community ----
+   Option lists are built from the WHOLE division so the pickers never collapse as you filter. */
+function freqData(){
+  const f=freqState();
+  const selC=new Set(f.comms), selP=new Set(f.plans);
+  const pnm=(planLookup()[state.divKey])||{};
+  const nameOf=pl=>pnm[String(pl==null?"":pl).trim().toUpperCase()]||"";
+  const commOpts=new Map(), planOpts=new Map(), byPlan=new Map(), commTot=new Map();
+  let matched=0;
+  state.flow.forEach(r=>{
+    if(!r.plan) return;
+    const ck=String(r.community_num||r.community_name||"").trim(); if(!ck) return;
+    const cname=r.community_name||r.community_num||ck;
+    const p=String(r.plan), pn=nameOf(p);
+    if(!commOpts.has(ck)) commOpts.set(ck,cname);
+    if(!planOpts.has(p))  planOpts.set(p, pn?`${p} — ${pn}`:p);
+    if(!freqInRange(r,f.basis,f.from,f.to)) return;
+    if(selC.size && !selC.has(ck)) return;
+    if(selP.size && !selP.has(p))  return;
+    if(!matchFilter([cname,r.community_num,p,pn,r.elevation].join(" "))) return;
+    matched++;
+    let e=byPlan.get(p);
+    if(!e){ e={ plan:p, name:pn, total:0, comms:new Map(), evs:new Set(), first:null, last:null, rel:0 }; byPlan.set(p,e); }
+    e.total++;
+    let c=e.comms.get(ck); if(!c){ c={ ck, name:cname, n:0 }; e.comms.set(ck,c); } c.n++;
+    commTot.set(ck,(commTot.get(ck)||0)+1);
+    if(String(r.elevation||"").trim()) e.evs.add(lc(r.elevation));
+    if(effective(r,"released")) e.rel++;
+    const lo=r.first_trench_date, hi=r.last_trench_date||r.first_trench_date;
+    if(lo && (!e.first || lo<e.first)) e.first=lo;
+    if(hi && (!e.last  || hi>e.last )) e.last =hi;
+  });
+  const plans=[...byPlan.values()].sort((a,b)=> b.total-a.total || a.plan.localeCompare(b.plan,undefined,{numeric:true}));
+  plans.forEach(e=>{ e.commList=[...e.comms.values()].sort((x,y)=> y.n-x.n || String(x.name).localeCompare(String(y.name))); });
+  const legend=[...commTot.entries()].sort((a,b)=>b[1]-a[1])
+    .map(([ck,n])=>({ ck, name:commOpts.get(ck)||ck, n }));
+  return { plans, matched, legend,
+    commOpts:[...commOpts.entries()].map(([value,label])=>({value,label}))
+      .sort((a,b)=>String(a.label).localeCompare(String(b.label))),
+    planOpts:[...planOpts.entries()].map(([value,label])=>({value,label}))
+      .sort((a,b)=>a.value.localeCompare(b.value,undefined,{numeric:true})) };
+}
+
+/* ---- generic multi-select dropdown (reuses the Plans-tab .pl-dd styling) ----
+   `noun` is [singular, plural] so the button reads "1 community selected". */
+function mselLabel(n, noun){ return n ? `${n} ${n===1?noun[0]:noun[1]} selected` : `All ${noun[1]}`; }
+function mselHTML(id, noun, options, selected){
+  const sel=new Set(selected||[]);
+  return `<div class="pl-dd" id="${id}">
+      <button type="button" class="btn mini ghost pl-dd-btn" data-msel-btn>${esc(mselLabel(sel.size,noun))} &#9662;</button>
+      <div class="pl-dd-panel hidden">
+        <input type="text" class="pl-dd-search" placeholder="Search ${esc(noun[1])}…">
+        <button type="button" class="linkbtn pl-dd-master">Select all</button>
+        <div class="pl-dd-list">${
+          options.map(o=>`<label class="msel-opt pl-dd-opt"><input type="checkbox" value="${esc(o.value)}"${sel.has(o.value)?" checked":""}> ${esc(o.label)}</label>`).join("")
+          || `<div class="empty" style="padding:12px">None in this division.</div>`}</div>
+        <button type="button" class="linkbtn pl-dd-clearall">Clear selection</button>
+      </div>
+    </div>`;
+}
+function bindMsel(id, noun, onChange){
+  const root=$(id); if(!root) return;
+  const panel=root.querySelector(".pl-dd-panel"), btn=root.querySelector("[data-msel-btn]"),
+        search=root.querySelector(".pl-dd-search"), list=root.querySelector(".pl-dd-list");
+  const boxes=()=>[...list.querySelectorAll("input[type=checkbox]")];
+  const vis=()=>boxes().filter(b=>b.closest(".pl-dd-opt").style.display!=="none");
+  const emit=()=>{ const on=boxes().filter(b=>b.checked).map(b=>b.value);
+    btn.innerHTML=esc(mselLabel(on.length,noun))+" &#9662;";
+    onChange(on); };
+  btn.onclick=e=>{ e.stopPropagation(); const hid=panel.classList.toggle("hidden"); if(!hid) search.focus(); };
+  panel.onclick=e=>e.stopPropagation();
+  search.oninput=()=>{ const q=lc(search.value);
+    boxes().forEach(b=>{ const o=b.closest(".pl-dd-opt"); o.style.display=(!q||lc(o.textContent).includes(q))?"":"none"; }); };
+  search.onkeydown=e=>{ if(e.key==="Enter"){ e.preventDefault(); panel.classList.add("hidden"); } };
+  root.querySelector(".pl-dd-master").onclick=()=>{ const v=vis(); const allOn=v.length&&v.every(b=>b.checked); v.forEach(b=>b.checked=!allOn); emit(); };
+  root.querySelector(".pl-dd-clearall").onclick=()=>{ boxes().forEach(b=>b.checked=false); search.value=""; boxes().forEach(b=>b.closest(".pl-dd-opt").style.display=""); emit(); };
+  list.onchange=emit;
+}
+
+function renderFreq(tb,area){
+  const f=freqState();
+  const d0=freqData();                       // for the option universe (independent of filters)
+  const presets=freqPresets();
+  const curPreset=(presets.find(p=>p.from===f.from && p.to===f.to)||{}).v || "custom";
+
+  tb.innerHTML=`<span class="count" id="fqCount"></span>`
+    + `<select id="fqBasis" title="Which date the range filters on">${
+        FREQ_BASES.map(b=>`<option value="${b.v}"${f.basis===b.v?" selected":""}>${esc(b.label)}</option>`).join("")}</select>`
+    + `<select id="fqPreset" title="Quick date ranges">${
+        presets.map(p=>`<option value="${p.v}"${curPreset===p.v?" selected":""}>${esc(p.label)}</option>`).join("")
+      }<option value="custom"${curPreset==="custom"?" selected":""}>Custom…</option></select>`
+    + `<span class="fq-range"><input type="date" class="fq-date" id="fqFrom" value="${esc(f.from)}" title="From (inclusive)">`
+    + `<span class="fq-dash">&ndash;</span>`
+    + `<input type="date" class="fq-date" id="fqTo" value="${esc(f.to)}" title="To (inclusive)"></span>`
+    + mselHTML("fqCommDd",["community","communities"],d0.commOpts,f.comms)
+    + mselHTML("fqPlanDd",["plan","plans"],d0.planOpts,f.plans)
+    + `<button class="btn mini ghost" data-export>&#8681; Export CSV</button>`
+    + `<span class="grow"></span>`
+    + `<span class="section-note" style="margin:0" id="fqNote"></span>`;
+  area.innerHTML=`<div id="fqBody"></div>`;
+
+  const paint=()=>{
+    const d=freqData();
+    const body=$("fqBody"); if(!body) return;
+    $("fqNote").innerHTML=FREQ_BASIS_NOTE[f.basis]+" Current division only.";
+    const plans=d.plans, maxN=plans.length?plans[0].total:0;
+    const comms=new Set(); plans.forEach(e=>e.comms.forEach((_,k)=>comms.add(k)));
+    $("fqCount").textContent=`${d.matched} occurrence${d.matched===1?"":"s"} · ${plans.length} plan${plans.length===1?"":"s"} · ${comms.size} communit${comms.size===1?"y":"ies"}`;
+
+    if(!plans.length){
+      body.innerHTML=`<div class="empty">No plans fall in this date range.${
+        (f.comms.length||f.plans.length)?" Try clearing the community/plan filters.":""}</div>`;
+      return;
+    }
+    const top=plans[0];
+    const cap=f.showAll?plans.length:Math.min(FREQ_CHART_CAP,plans.length);
+    const shown=plans.slice(0,cap);
+    const rangeTxt=(f.from||f.to)?`${f.from?fmtDate(f.from):"start"} – ${f.to?fmtDate(f.to):"today onward"}`:"all dates";
+
+    const cards=`<div class="fq-cards">
+        <div class="fq-card"><div class="fq-card-n">${d.matched}</div><div class="fq-card-l">Plan / elevation occurrences</div></div>
+        <div class="fq-card"><div class="fq-card-n">${plans.length}</div><div class="fq-card-l">Distinct plans</div></div>
+        <div class="fq-card"><div class="fq-card-n">${comms.size}</div><div class="fq-card-l">Communities</div></div>
+        <div class="fq-card"><div class="fq-card-n">${esc(top.plan)}</div><div class="fq-card-l">Most frequent · ${top.total}&times;${top.name?` · ${esc(top.name)}`:""}</div></div>
+      </div>`;
+
+    const legend=d.legend.slice(0,16).map(c=>
+        `<span class="fq-leg"><i style="background:${freqColor(c.ck)}"></i>${esc(c.name)} <b>${c.n}</b></span>`).join("")
+      + (d.legend.length>16?`<span class="fq-leg-more">+${d.legend.length-16} more</span>`:"");
+
+    const bars=shown.map(e=>{
+      const w=maxN?(e.total/maxN*100):0;
+      const segs=e.commList.map(c=>
+        `<span class="fq-seg" style="width:${(c.n/e.total*100).toFixed(4)}%;background:${freqColor(c.ck)}" title="${esc(c.name)} — ${c.n}"></span>`).join("");
+      return `<div class="fq-row">
+          <div class="fq-lab" title="${esc(e.plan)}${e.name?` — ${esc(e.name)}`:""}">${esc(e.plan)}${e.name?`<span class="fq-lab-n">${esc(e.name)}</span>`:""}</div>
+          <div class="fq-bar" style="width:${w.toFixed(4)}%">${segs}</div>
+          <span class="fq-val">${e.total}</span>
+        </div>`;
+    }).join("");
+
+    const table=`<div class="table-wrap fq-table"><table><thead><tr>
+        <th>Plan</th><th>Plan Name</th><th class="num">Count</th><th class="num">Share</th>
+        <th class="num">Communities</th><th class="num">Elevations</th><th class="num">Released</th>
+        <th>Earliest start</th><th>Latest start</th><th>Communities (count)</th>
+      </tr></thead><tbody>${plans.map(e=>`<tr>
+        <td><b>${esc(e.plan)}</b></td><td>${esc(e.name)}</td>
+        <td class="num"><b>${e.total}</b></td>
+        <td class="num">${d.matched?(e.total/d.matched*100).toFixed(1):"0.0"}%</td>
+        <td class="num">${e.commList.length}</td><td class="num">${e.evs.size}</td>
+        <td class="num">${e.rel} / ${e.total}</td>
+        <td>${esc(fmtDate(e.first))}</td><td>${esc(fmtDate(e.last))}</td>
+        <td class="fq-cw">${e.commList.map(c=>`<span class="chip"><i class="fq-dot" style="background:${freqColor(c.ck)}"></i>${esc(c.name)} ${c.n}</span>`).join("")}</td>
+      </tr>`).join("")}</tbody></table></div>`;
+
+    body.innerHTML=cards
+      + `<div class="fq-panel"><div class="fq-panel-h">Frequency by plan <span class="fq-sub">${esc(rangeTxt)} · stacked by community</span></div>
+           <div class="fq-legend">${legend}</div>
+           <div class="fq-chart">${bars}</div>
+           ${plans.length>FREQ_CHART_CAP?`<button class="linkbtn fq-more" id="fqMore">${f.showAll?"Show top "+FREQ_CHART_CAP+" only":`Show all ${plans.length} plans`}</button>`:""}
+         </div>`
+      + table;
+    const more=$("fqMore"); if(more) more.onclick=()=>{ f.showAll=!f.showAll; paint(); };
+    savePrefs();
+  };
+
+  // Toolbar wiring — these repaint the body only, so the open dropdown / focused
+  // date field survives (a full render() would rebuild and close them).
+  const syncPreset=()=>{ const p=freqPresets().find(p=>p.from===f.from&&p.to===f.to); $("fqPreset").value=p?p.v:"custom"; };
+  $("fqBasis").onchange=e=>{ f.basis=e.target.value; paint(); };
+  $("fqPreset").onchange=e=>{ const p=freqPresets().find(x=>x.v===e.target.value); if(!p) return;
+    f.from=p.from; f.to=p.to; $("fqFrom").value=p.from; $("fqTo").value=p.to; paint(); };
+  $("fqFrom").onchange=e=>{ f.from=e.target.value||""; syncPreset(); paint(); };
+  $("fqTo").onchange  =e=>{ f.to  =e.target.value||""; syncPreset(); paint(); };
+  bindMsel("fqCommDd",["community","communities"],v=>{ f.comms=v; f.showAll=false; paint(); });
+  bindMsel("fqPlanDd",["plan","plans"],           v=>{ f.plans=v; f.showAll=false; paint(); });
+
+  if(window._fqDdClose) document.removeEventListener("click",window._fqDdClose);
+  window._fqDdClose=()=>{ document.querySelectorAll("#viewToolbar .pl-dd-panel").forEach(p=>p.classList.add("hidden")); };
+  document.addEventListener("click",window._fqDdClose);
+
+  paint();
+}
+
 /* ---------------- sortable + filterable headers ---------------- */
 /* Each grid passes a `cols` array of {f, h, cls, calc, sortable?, filterable?, raw(row), disp(row)}.
    raw() drives sorting (comparable value); disp() drives per-column text filtering. */
@@ -1556,6 +1816,18 @@ function exportCSV(){
       const m=new Map(); state.flow.forEach(r=>{ if(!r.plan) return; const p=String(r.plan); const ck=r.community_num||r.community_name; if(!ck) return; let e=m.get(p); if(!e){ e={plan:p,comms:new Map()}; m.set(p,e);} e.comms.set(ck,{name:r.community_name||"",num:r.community_num||""}); });
       rows=[]; [...m.values()].sort((a,b)=>a.plan.localeCompare(b.plan,undefined,{numeric:true})).forEach(e=>{ if(sel.size && ![...e.comms.keys()].some(k=>sel.has(k))) return; [...e.comms.values()].sort((a,b)=>String(a.name).localeCompare(String(b.name))).forEach(c=>rows.push([e.plan,nameOf(e.plan),c.name,c.num])); });
     } }
+  else if(state.view==="freq"){
+    const f=freqState(), d=freqData();
+    const basisLbl=(FREQ_BASES.find(b=>b.v===f.basis)||{}).label||f.basis;
+    name="plan_frequency";
+    cols=["Plan","Plan Name","Count","Share %","Communities","Elevations","Released","Earliest Start","Latest Start","Community Breakdown","Date Basis","From","To"];
+    rows=d.plans.map(e=>[e.plan, e.name, e.total,
+      d.matched?(e.total/d.matched*100).toFixed(1):"0.0",
+      e.commList.length, e.evs.size, `${e.rel} of ${e.total}`,
+      fmtDate(e.first), fmtDate(e.last),
+      e.commList.map(c=>`${c.name} (${c.n})`).join("; "),
+      basisLbl, f.from||"(none)", f.to||"(none)"]);
+  }
   else { cols=["Community","Comm #","Plan","Plan Name","Ele","Trench"]; name="todo_outstanding";
     rows=todoOutstanding().map(r=>[r.community_name,r.community_num,r.plan,planName(r),r.elevation,fmtDate(r.first_trench_date)]); }
   const csv=[cols,...rows].map(r=>r.map(v=>{ v=v==null?"":String(v);
