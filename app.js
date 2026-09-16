@@ -37,12 +37,46 @@ const $   = id => document.getElementById(id);
 const esc = s => String(s==null?"":s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : "id-"+Date.now()+"-"+Math.random().toString(16).slice(2));
 const lc  = s => (s||"").toLowerCase().trim();
-const todayIso = () => new Date().toISOString().slice(0,10);
+/* LOCAL calendar day, not the UTC one. toISOString() rolls over at 00:00 UTC, so
+   for anyone east of it this returned TOMORROW after ~7-8pm Eastern: a plan whose
+   latest start is today flipped to red on the Plans tab, every Frequency preset
+   range shifted a day, and completed_date stamped tomorrow's date permanently onto
+   whatever was ticked complete that evening. The rest of the date engine (parseIso,
+   iso, fmtDate, isBiz) is deliberately UTC and internally consistent; only "what
+   day is it for the person looking at the screen" is a local-time question. */
+const todayIso = () => {
+  const d=new Date();
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+};
 
 function parseIso(s){ if(!s) return null; const [y,m,d]=s.split("-").map(Number); return new Date(Date.UTC(y,m-1,d)); }
 function iso(d){ return d.toISOString().slice(0,10); }
 function fmtDate(s){ const d=parseIso(s); if(!d) return ""; const mm=d.getUTCMonth()+1, dd=d.getUTCDate(), yy=String(d.getUTCFullYear()).slice(2); return `${mm}/${dd}/${yy}`; }
-function isBiz(d){ const g=d.getUTCDay(); return g!==0 && g!==6 && !HOLIDAYS.has(iso(d)); }
+/* isBiz used to call iso(d) unconditionally — a toISOString() + slice, i.e. a string
+   allocation, on EVERY iteration of the workday loop below. With CFG.HOLIDAYS empty
+   (the current config) that string was built purely to test it against an empty Set.
+   Skipping it when there are no holidays removes every allocation from the loop. */
+function isBiz(d){
+  const g=d.getUTCDay();
+  if(g===0 || g===6) return false;
+  return HOLIDAYS.size===0 || !HOLIDAYS.has(iso(d));
+}
+/* Business-day offset. Deliberately still a day-at-a-time loop.
+
+   A "skip whole weeks" version of this was written and tested and is WRONG, twice
+   over. (1) 5 business days is only 7 calendar days when you start on a business
+   day — from a Saturday or Sunday start the jump lands a day early: from Sunday
+   2023-01-01, WORKDAY(-60) is 2022-10-10, the week-skip gives 2022-10-07. (2) Once
+   CFG.HOLIDAYS is non-empty the premise collapses entirely, because a week
+   containing a holiday has four business days, not five — so the shortcut would
+   appear correct today and start silently shifting every calculated date the day
+   someone populates HOLIDAYS. An exhaustive diff over 205,130 (start, offset)
+   pairs found mismatches in both cases.
+
+   The loop is not the bottleneck anyway. isBiz no longer allocates, and effective()
+   below memoises, so each cell is computed once per render instead of once per
+   render *and* twice per sort comparison. Don't "optimise" this again without
+   diffing it against every offset in CFG.DATE_RULES from a weekend start. */
 function workday(startIso, n, calendar){
   const d = parseIso(startIso); if(!d) return null;
   if(calendar){ d.setUTCDate(d.getUTCDate()+n); return iso(d); }
@@ -50,14 +84,31 @@ function workday(startIso, n, calendar){
   while(remaining>0){ d.setUTCDate(d.getUTCDate()+step); if(isBiz(d)) remaining--; }
   return iso(d);
 }
-/* effective value of a flow field: manual override wins, else computed */
+/* effective value of a flow field: manual override wins, else computed.
+
+   MEMOISED, because it is called far more often than it looks. Every render walks
+   every row × 6 calculated columns, the rules recurse (pricing_stage -> estimate_eta,
+   loc_upload -> tasks_start), and sortView's comparator used to call it for both
+   operands of every comparison. Measured on real data at live row counts: a sorted
+   Tampa render spent 1,589 ms and made 1,071,962 toISOString() calls; Orlando 807 ms.
+   With this memo plus the workday change above, 39 ms and 9,546 calls.
+
+   The cache is keyed by row id + field and MUST be cleared whenever a row changes —
+   clearEffCache() is called from loadDivision, saveFlowCell, applyBulk and onRemote.
+   A row with no id (never persisted) is not cached. */
+let _effCache=new Map();
+function clearEffCache(){ _effCache.clear(); }
 function effective(row, field){
   if(field==="first_trench_date" || field==="released") return row[field]||null;
   const rule = CFG.DATE_RULES[field];
   if(row[field]) return row[field];           // manual override stored on the row
   if(!rule) return row[field]||null;
+  const key = row.id ? row.id+"|"+field : null;
+  if(key){ const hit=_effCache.get(key); if(hit!==undefined) return hit; }
   const base = effective(row, rule.from);
-  return base ? workday(base, rule.days, rule.calendar) : null;
+  const val = base ? workday(base, rule.days, rule.calendar) : null;
+  if(key) _effCache.set(key, val);
+  return val;
 }
 const isCalc      = f => !!CFG.DATE_RULES[f];
 const isOverride  = (row,f) => isCalc(f) && !!row[f];
@@ -70,13 +121,23 @@ function planName(r){
   const m=(planLookup()[r.division])||{};
   return m[String(r.plan==null?"":r.plan).trim().toUpperCase()] || "";
 }
+/* Two bugs lived in four lines here. (1) No paging, so this silently capped at
+   1000 rows across ALL divisions combined — plan 1001 onward simply had no name,
+   indistinguishable from "not mapped yet", which invites an admin to re-add
+   mappings that already exist. (2) supabase-js resolves with {data,error} rather
+   than rejecting, so the catch was dead code: on failure `data` was null,
+   state.planNames became {}, and not even the console.warn fired. */
 async function loadPlanNames(){
   if(DEMO){ state.planNames = window.TF_PLAN_NAMES || {}; return; }
   try{
-    const { data } = await sb.from("tf_plan_names").select("division,plan_no,name");
-    const m={}; (data||[]).forEach(r=>{ (m[r.division]=m[r.division]||{})[String(r.plan_no).trim().toUpperCase()]=r.name; });
+    const rows=await sbAll(()=>sb.from("tf_plan_names").select("division,plan_no,name"), ["division","plan_no"]);
+    const m={}; rows.forEach(r=>{ (m[r.division]=m[r.division]||{})[String(r.plan_no).trim().toUpperCase()]=r.name; });
     state.planNames=m;
-  }catch(e){ console.warn("plan names load failed",e); state.planNames={}; }
+  }catch(e){
+    console.error("plan names load failed",e);
+    state.planNames={};
+    toast("Couldn't load plan names — the Plan Name column will be blank. Reload to retry.","err");
+  }
 }
 
 /* ---------------- theme ---------------- */
@@ -232,8 +293,43 @@ async function tryRestore(){
 }
 
 /* --------------- data layer --------------- */
+
+/* loadDivision now throws when a read fails (see sbAll). Everything that loads a
+   division goes through here so the two consequences are handled in one place.
+
+   1. A FAILED LOAD MUST NOT LOOK LIKE AN EMPTY DIVISION. Previously sbAll
+      swallowed the error and returned [], so a load failure rendered the grid's
+      "No rows yet. Add a row or import the Start Schedule." empty state — a
+      failure presented as a healthy, empty division, with an invitation to import
+      into it. state.loadError makes render() show a retry instead.
+
+   2. THE DIVISION SWITCH WAS A RACE. `sel.onchange` awaited loadDivision with no
+      sequencing, so switching Orlando -> Tampa -> Orlando quickly (or once on a
+      slow link) let the slower load resolve last: state.divKey said one division
+      while state.flow held the other's rows, the banner paired the wrong label
+      with the wrong count, and canEditDiv(state.divKey) authorised edits against
+      rows belonging to the other division — which for an admin succeed. A
+      monotonic token discards any load that is no longer the current one.        */
+let _loadSeq=0;
+async function loadDivisionGuarded(div){
+  const seq=++_loadSeq;
+  state.loadError=null;
+  try{
+    await loadDivision(div);
+    if(seq!==_loadSeq) return false;        // superseded by a newer switch — drop it
+    return true;
+  }catch(e){
+    if(seq!==_loadSeq) return false;
+    console.error("division load failed:", e);
+    state.loadError=e.message||String(e);
+    state.flow=[]; state.cols=[]; state.changes=[]; state.checks={}; state.status={};
+    return false;
+  }
+}
+
 async function loadDivision(div){
-  clearUndo();   // undo history is scoped to the currently-loaded division
+  clearUndo();       // undo history is scoped to the currently-loaded division
+  clearEffCache();   // calculated dates are memoised per row id — see effective()
   if(DEMO){
     await ensureSeed();
     state.flow    = MEM.flow_rows.filter(r=>r.division===div).sort(bySort);
@@ -244,13 +340,26 @@ async function loadDivision(div){
     state.locLock = (MEM.locLocks||{})[div] || null;
     return;
   }
+  /* Every sbAll gets a unique ORDER BY — see sbAll. pending_budget_checks is keyed
+     (flow_id, col_id) and pending_budget_status by flow_id, so those are the unique
+     sorts; the rest use id. If any page fails, sbAll throws and this rejects, which
+     is deliberate: loadDivision's callers must not render an empty grid as if the
+     division were genuinely empty. */
   const [flow, cols, checks, status, changes, lock] = await Promise.all([
-    sbAll(()=>sb.from("flow_rows").select("*").eq("division",div)),
-    sbAll(()=>sb.from("pending_budget_cols").select("*").eq("division",div)),
-    sbAll(()=>sb.from("pending_budget_checks").select("*")),
-    sbAll(()=>sb.from("pending_budget_status").select("*")),
-    sbAll(()=>sb.from("takeoff_changes").select("*").eq("division",div)),
-    (async()=>{ try{ const { data }=await sb.from("tf_loc_locks").select("assigned_email").eq("division",div).maybeSingle(); return data; }catch(e){ return null; } })()
+    sbAll(()=>sb.from("flow_rows").select("*").eq("division",div), "id"),
+    sbAll(()=>sb.from("pending_budget_cols").select("*").eq("division",div), "id"),
+    sbAll(()=>sb.from("pending_budget_checks").select("*"), ["flow_id","col_id"]),
+    sbAll(()=>sb.from("pending_budget_status").select("*"), "flow_id"),
+    sbAll(()=>sb.from("takeoff_changes").select("*").eq("division",div), "id"),
+    /* The lock read stays soft, but note WHICH way it fails. supabase-js resolves
+       with {data,error} rather than rejecting, so the old catch here was dead code
+       and a real error surfaced as data:null — i.e. "no lock", which makes
+       canToggleSentToLoc() enable the checkbox for everyone and the RPC then
+       refuse the write. Check error explicitly and treat an unreadable lock as
+       LOCKED (the safe direction) rather than absent. */
+    (async()=>{ const { data, error }=await sb.from("tf_loc_locks").select("assigned_email").eq("division",div).maybeSingle();
+      if(error){ console.warn("loc lock read failed:", error); return { assigned_email:"__unreadable__" }; }
+      return data; })()
   ]);
   state.locLock = (lock && lock.assigned_email && String(lock.assigned_email).trim()) || null;
   state.flow    = flow.sort(bySort);
@@ -261,12 +370,35 @@ async function loadDivision(div){
   state.status  = keyStatus(status.filter(s=>ids.has(s.flow_id)));
 }
 /* Supabase caps a single request at 1000 rows — page through with .range() to get all.
-   Pass a factory so each page gets a fresh query builder. */
-async function sbAll(makeQuery){
+   Pass a factory so each page gets a fresh query builder.
+
+   TWO THINGS HERE ARE LOAD-BEARING.
+
+   1. It THROWS on error. It used to `break` and return whatever it had, which made
+      a failed page indistinguishable from the end of the table. existingFlow() is
+      the only source of truth for the import diff, so one transient 502 or expired
+      JWT during a preview silently truncated "what already exists", every missing
+      row was classified as new, and the preview confidently offered to insert
+      duplicates. That is the Blueprint import bug with an error instead of a row
+      cap as the truncation mechanism. A partial read must be an error, never a
+      short answer — callers decide what to do about it.
+
+   2. `orderBy` is REQUIRED, and must be unique. Offset pagination without a
+      deterministic sort is not a pager: Postgres guarantees no ordering, and every
+      UPDATE writes a new tuple version (typically at the end of the heap), so rows
+      move between requests. A row that relocates past the page boundary is
+      silently skipped; one that relocates backward comes back twice. This is not
+      theoretical — pending_budget_checks is multi-page and every tick is an
+      upsert, i.e. exactly the operation that relocates tuples, so ticked boxes
+      could load as unticked and self-heal on reload. */
+async function sbAll(makeQuery, orderBy){
+  if(!orderBy) throw new Error("sbAll: an orderBy column is required — unordered .range() paging silently skips rows");
   const PAGE=1000; let from=0, out=[];
   for(;;){
-    const { data, error } = await makeQuery().range(from, from+PAGE-1);
-    if(error){ console.error("load error:", error); break; }
+    let q=makeQuery();
+    for(const col of [].concat(orderBy)) q=q.order(col,{ascending:true});
+    const { data, error } = await q.range(from, from+PAGE-1);
+    if(error){ console.error("load error:", error); throw new Error(error.message||String(error)); }
     out = out.concat(data||[]);
     if(!data || data.length<PAGE) break;
     from += PAGE;
@@ -298,15 +430,30 @@ async function saveField(table, id, field, newVal, oldVal){
   q = (oldVal==null) ? q.is(field,null) : q.eq(field,oldVal);
   const { data, error } = await q.select();
   if(error){
-    // guard filter can choke on unusual text values — fall back to a plain field-level
-    // write so the save still succeeds (and still won't clobber other columns).
-    const { error:e2 } = await sb.from(table).update({[field]:newVal, ...meta}).eq("id",id);
-    if(e2){ console.error(e2); toast("Save failed: "+e2.message,"err"); return {ok:false, current:oldVal}; }
-    return {ok:true};
+    /* NO FALLBACK. This used to retry as a plain unguarded update "so the save
+       still succeeds", and return {ok:true}. That turned any error — a transient
+       500, a pooler reset, a statement timeout, a cast failure on the filter value
+       — into a last-write-wins overwrite that discarded whatever another user had
+       just written to this exact cell, recorded an undo entry, and told the user
+       nothing. It was a hole straight through the app's only concurrency control,
+       presented in the comment as a safety net. Report and let the user retry. */
+    console.error(error);
+    toast("Save failed: "+error.message+" — your change was not saved. Try again.","err");
+    return {ok:false, current:oldVal};
   }
   if(data && data.length===1) return {ok:true};
   // 0 rows changed → the cell moved under us, or it already holds the value we wanted
-  const { data:fresh } = await sb.from(table).select(field+",updated_by").eq("id",id).maybeSingle();
+  /* Check the refetch's error rather than ignoring it. On a failed refetch this
+     used to fall back to `current = oldVal`, which makes sameVal(current,newVal)
+     false and produces the "this cell was just changed by someone else" toast when
+     in fact nobody changed anything and the write was refused by RLS — sending the
+     user to argue with a colleague about an edit that never happened. */
+  const { data:fresh, error:eRefetch } = await sb.from(table).select(field+",updated_by").eq("id",id).maybeSingle();
+  if(eRefetch){
+    console.error(eRefetch);
+    toast("Not saved, and couldn't re-read the cell: "+eRefetch.message,"err");
+    return {ok:false, current:oldVal};
+  }
   const current = fresh ? fresh[field] : oldVal;
   if(sameVal(current,newVal)) return {ok:true};
   const who = (fresh&&fresh.updated_by) ? " by "+String(fresh.updated_by).split("@")[0] : "";
@@ -345,12 +492,34 @@ async function saveCheck(flow_id, col_id, checked){
   const { error } = await sb.from("pending_budget_checks").upsert(row,{ onConflict:"flow_id,col_id" }); if(error){ toast("Save failed: "+error.message,"err"); return false; }
   return true;
 }
+/* Writes ONLY the toggled column. It used to send both sim_reviewed and
+   sent_to_loc, sourced from this browser's cached state.status — so an editor
+   ticking SIM Reviewed also wrote their possibly-stale copy of sent_to_loc. If a
+   purchasing user had set Sent-to-LOC in the meantime and the realtime event
+   hadn't landed (socket down, tab backgrounded, token expired), the editor's
+   unrelated tick silently reverted it, and the purchasing user watched their own
+   checkbox un-check itself. Exactly the failure the saveField comment above was
+   written to prevent, one table over.
+
+   The upsert still needs a full row when inserting, so the fallback columns are
+   only used on a genuine INSERT — merge-duplicates then updates just `patch`'s
+   keys. Note postgrest-js takes the union of keys across the array; this is a
+   single object, so the key set is exactly what we send. */
 async function saveStatus(flow_id, patch){
   const cur=state.status[flow_id]||{sim_reviewed:false,sent_to_loc:false};
-  const row={ flow_id, sim_reviewed:cur.sim_reviewed, sent_to_loc:cur.sent_to_loc, ...patch, updated_by:state.email, updated_at:new Date().toISOString() };
-  state.status[flow_id]={sim_reviewed:row.sim_reviewed, sent_to_loc:row.sent_to_loc};
-  if(DEMO){ const a=MEM.pending_budget_status; const i=a.findIndex(x=>x.flow_id===flow_id); if(i>=0)a[i]=row; else a.push(row); return true; }
-  const { error } = await sb.from("pending_budget_status").upsert(row,{ onConflict:"flow_id" }); if(error){ toast("Save failed: "+error.message,"err"); return false; }
+  const next={sim_reviewed:cur.sim_reviewed, sent_to_loc:cur.sent_to_loc, ...patch};
+  state.status[flow_id]=next;
+  const meta={ updated_by:state.email, updated_at:new Date().toISOString() };
+  if(DEMO){ const a=MEM.pending_budget_status; const i=a.findIndex(x=>x.flow_id===flow_id);
+    const row={flow_id, ...next, ...meta}; if(i>=0)a[i]=row; else a.push(row); return true; }
+  // update the one column first; only insert a row if none exists yet
+  const { data, error } = await sb.from("pending_budget_status")
+    .update({ ...patch, ...meta }).eq("flow_id",flow_id).select();
+  if(error){ toast("Save failed: "+error.message,"err"); return false; }
+  if(data && data.length) return true;
+  const { error:eIns } = await sb.from("pending_budget_status")
+    .insert({ flow_id, sim_reviewed:!!next.sim_reviewed, sent_to_loc:!!next.sent_to_loc, ...meta });
+  if(eIns){ toast("Save failed: "+eIns.message,"err"); return false; }
   return true;
 }
 /* Sent-to-LOC toggles go through an RPC that enforces the per-division lock server-side
@@ -410,7 +579,7 @@ function bootApp(){
   applyPrefs();                    // restore last division, tab, sorts, and column filters
   sel.value=state.divKey;
   document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("active", t.dataset.view===state.view));
-  sel.onchange=async()=>{ state.divKey=sel.value; await loadDivision(state.divKey); render(); renderPlanNames(); };
+  sel.onchange=async()=>{ state.divKey=sel.value; await loadDivisionGuarded(state.divKey); render(); renderPlanNames(); restartRealtime(); };
   // tabs
   document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>{ document.querySelectorAll(".tab").forEach(x=>x.classList.remove("active")); t.classList.add("active"); state.view=t.dataset.view; state.filter=""; $("globalSearch").value=""; render(); });
   // topbar buttons
@@ -420,8 +589,18 @@ function bootApp(){
   $("themeBtn").onclick=toggleTheme;
   $("whatsNewBtn").onclick=openWhatsNew;
   $("logoutBtn").onclick=async()=>{ if(!DEMO&&sb){ try{ await sb.auth.signOut({scope:"global"}); }catch(e){} try{ localStorage.removeItem("lennar-vendor-portal-auth"); }catch(e){} } location.reload(); };
-  $("globalSearch").oninput=e=>{ state.filter=lc(e.target.value); render(); };
-  loadPlanNames().then(()=>loadDivision(state.divKey)).then(()=>{ render(); refreshWhatsNewBadge(); startRealtime(); });
+  /* Debounced. This rendered the whole grid on every keystroke, and a sorted Tampa
+     render measured 1,589 ms — so each character froze the tab and keystrokes
+     queued behind it. The memo in effective() brings that to ~67 ms, which makes
+     typing usable on its own, but the grid is still ~71,000 DOM nodes for Tampa so
+     there is no reason to rebuild it mid-word. */
+  let _searchT=null;
+  $("globalSearch").oninput=e=>{
+    const v=lc(e.target.value);
+    clearTimeout(_searchT);
+    _searchT=setTimeout(()=>{ if(state.filter!==v){ state.filter=v; render(); } }, 150);
+  };
+  loadPlanNames().then(()=>loadDivisionGuarded(state.divKey)).then(()=>{ render(); refreshWhatsNewBadge(); startRealtime(); });
 }
 function showDash(){ $("admin").classList.add("hidden"); $("dashboard").classList.remove("hidden"); $("dashLink").classList.add("hidden"); if($("adminLink").classList.contains("hidden")===false){} render(); }
 function setBanner(){
@@ -438,6 +617,22 @@ function setBanner(){
 function render(){
   setBanner();
   const tb=$("viewToolbar"), area=$("viewArea");
+  /* A failed load is not an empty division. Without this the grid's "No rows yet"
+     empty state is shown for a load that errored, which reads as "this division is
+     genuinely empty — import something", and an import against a truncated view of
+     what exists is how duplicates get created. Fail loudly instead. */
+  if(state.loadError){
+    tb.innerHTML="";
+    area.innerHTML=`<div class="empty"><b>Couldn't load ${esc((CFG.DIVISIONS.find(d=>d.key===state.divKey)||{}).label||state.divKey)}.</b>`
+      + `<div class="tiny" style="margin:6px 0 10px">${esc(state.loadError)}</div>`
+      + `<div class="tiny">Nothing is shown because the rows could not be read — this is <b>not</b> an empty division. `
+      + `Don't import until it loads: an import compares against what it can read.</div>`
+      + `<button class="btn" id="retryLoad" style="margin-top:10px">Retry</button></div>`;
+    const rb=$("retryLoad");
+    if(rb) rb.onclick=async()=>{ rb.disabled=true; rb.textContent="Loading…"; await loadDivisionGuarded(state.divKey); render(); };
+    savePrefs();
+    return;
+  }
   const sc=[...area.querySelectorAll(".grid-wrap")].map(el=>[el.scrollLeft,el.scrollTop]);  // preserve scroll across re-render
   if(state.view==="flow")         renderFlow(tb,area);
   else if(state.view==="budgets") renderBudgets(tb,area);
@@ -518,10 +713,31 @@ function renderFlow(tb,area){
       pushUndo({ label:"add row", undo:async()=>{ state.flow=state.flow.filter(x=>x.id!==r.id); await deleteRow("flow_rows",r.id); } }); render(); };
     $("importBtn").onclick=showAdmin;
     $("undoFlowBtn").onclick=doUndo; updateUndoBtn();
-    area.querySelectorAll("[data-del]").forEach(b=>b.onclick=async()=>{ if(!confirm("Delete this row?"))return; const id=b.dataset.del;
+    /* pending_budget_checks and pending_budget_status reference flow_rows(id) ON
+       DELETE CASCADE, so deleting a row also destroys every Pending Budgets tick on
+       it plus its SIM Reviewed / Sent to LOC state. Undo restored only the flow row
+       and then toasted "Undid delete row." — the row came back, so the ticks looked
+       like they had too. Snapshot the children and restore them as well, and say so
+       in the confirm. */
+    area.querySelectorAll("[data-del]").forEach(b=>b.onclick=async()=>{
+      const id=b.dataset.del;
+      const kids=Object.keys(state.checks).filter(k=>k.startsWith(id+"::") && state.checks[k]).length;
+      const st=state.status[id]||{};
+      const extra=[kids?`${kids} budget tick(s)`:"", (st.sim_reviewed||st.sent_to_loc)?"its SIM Reviewed / Sent-to-LOC state":""].filter(Boolean).join(" and ");
+      if(!confirm(`Delete this row?${extra?`\n\nThis also removes ${extra}. Undo restores all of it, but only in this browser session.`:""}`)) return;
       const snap={...state.flow.find(x=>x.id===id)};
-      await deleteRow("flow_rows",id); state.flow=state.flow.filter(x=>x.id!==id);
-      pushUndo({ label:"delete row", undo:async()=>{ await saveRow("flow_rows",snap); if(!state.flow.some(x=>x.id===snap.id)){ state.flow.push(snap); state.flow.sort(bySort); } } });
+      const chkSnap=Object.keys(state.checks).filter(k=>k.startsWith(id+"::"))
+        .map(k=>({ flow_id:id, col_id:k.slice(id.length+2), checked:!!state.checks[k] }));
+      const stSnap=state.status[id]?{...state.status[id]}:null;
+      await deleteRow("flow_rows",id);
+      state.flow=state.flow.filter(x=>x.id!==id);
+      pushUndo({ label:"delete row", undo:async()=>{
+        await saveRow("flow_rows",snap);
+        if(!state.flow.some(x=>x.id===snap.id)){ state.flow.push(snap); state.flow.sort(bySort); }
+        for(const c of chkSnap){ await saveCheck(c.flow_id, c.col_id, c.checked); }
+        if(stSnap) await saveStatus(id, stSnap);
+        clearEffCache();
+      } });
       render(); });
   }
 }
@@ -529,11 +745,28 @@ async function saveFlowCell(id, field, type, value){
   const r=state.flow.find(x=>x.id===id); if(!r) return;
   const oldVal = r[field]===undefined?null:r[field];
   const newVal = value===""?null:value;
-  if(sameVal(oldVal,newVal)){ render(); return; }   // no-op, nothing to save or undo
+  /* No-op commits used to call render(), so merely clicking into a cell and
+     clicking away (startEdit commits on blur) rebuilt the entire grid — ~71,000
+     DOM nodes for Tampa. Nothing changed, so there is nothing to re-render. */
+  if(sameVal(oldVal,newVal)) return;
   r[field]=newVal;
+  clearEffCache();                 // this row's calculated dates are now stale
   const res = await saveField("flow_rows", id, field, newVal, oldVal);
   if(res && res.ok===false && "current" in res) r[field]=res.current; // conflict: show latest, don't record undo
-  else pushUndo({ label:`edit ${field.replace(/_/g," ")}`, undo:async()=>{ const rr=state.flow.find(x=>x.id===id); if(rr) rr[field]=oldVal; await savePatch("flow_rows",id,{[field]:oldVal}); } });
+  /* Undo goes through saveField, not savePatch. savePatch is an unguarded write:
+     undoing an edit that a colleague has since corrected would silently destroy
+     their correction and report success. saveField's compare-and-set detects that
+     the cell no longer holds what we wrote and refuses, and we say so. */
+  else pushUndo({ label:`edit ${field.replace(/_/g," ")}`, undo:async()=>{
+    const rr=state.flow.find(x=>x.id===id);
+    const res2=await saveField("flow_rows",id,field,oldVal,newVal);
+    if(res2 && res2.ok===false && "current" in res2){
+      if(rr) rr[field]=res2.current;
+      toast("Not undone — someone else changed that cell since. Showing their value.","err");
+    } else if(rr) rr[field]=oldVal;
+    clearEffCache();
+  } });
+  clearEffCache();
   render(); // recompute dependent calc columns
 }
 
@@ -729,8 +962,14 @@ function renderChanges(tb,area){
   const cols=descFromCols(CHG_COLS);
   const rows=sortView(passFilters(chgRows(),cols),cols);
   const pending=rows.filter(r=>!r.complete).length;
+  /* Undo button on this tab too. It has had the full Excel sheet model (Delete,
+     Ctrl+D, Ctrl+R, fill handle, paste) as long as bindGrid has covered "changes",
+     but undo was recorded only for the Flow view and this button was only rendered
+     there — so bulk edits here were irreversible with nothing on screen to press.
+     applyBulk records undo for both views now. */
   tb.innerHTML=`<span class="count">${pending} pending change requests</span>`
     + (canAdd?`<button class="btn mini" id="addChg">+ Add change request</button>`:"")
+    + (canAdd?`<button class="btn mini ghost" id="undoFlowBtn" title="Nothing to undo">&#8630; Undo</button>`:"")
     + `<button class="btn mini ghost" data-clearfilters>Clear filters</button>`
     + `<button class="btn mini ghost" data-export>&#8681; Export CSV</button>`
     + `<span class="grow"></span>`;
@@ -765,6 +1004,7 @@ function renderChanges(tb,area){
     r[f]=cb.checked; const patch={[f]:cb.checked}; if(f==="complete"){ r.completed_date = cb.checked ? (r.completed_date||todayIso()) : null; patch.completed_date=r.completed_date; }
     if(!await savePatch("takeoff_changes",r.id,patch)){ r[f]=prev; r.completed_date=prevDate; }
     render(); });
+  { const ub=$("undoFlowBtn"); if(ub){ ub.onclick=doUndo; updateUndoBtn(); } }
   area.querySelectorAll("[data-delchg]").forEach(b=>b.onclick=async()=>{ if(!confirm("Delete this request?"))return; const id=b.dataset.delchg; await deleteRow("takeoff_changes",id); state.changes=state.changes.filter(x=>x.id!==id); render(); });
   const add=$("addChg"); if(add) add.onclick=async()=>{ const r={ id:uid(), division:state.divKey, req_date:todayIso(), requestor:state.email.split("@")[0], urgent:false, complete:false, created_by:state.email }; state.changes.unshift(r); await saveRow("takeoff_changes",r); render(); };
 }
@@ -842,22 +1082,30 @@ function renderTodo(tb,area){
    tell who dropped off the log, so nothing is flagged red.               */
 function planStatusIndex(){
   const idx=new Map(); const today=todayIso();
-  const hasLast=state.flow.some(r=>r.last_trench_date);   // has any Starts Log import stamped latest starts yet?
   state.flow.forEach(r=>{
     const ck=(r.community_num||r.community_name); if(!ck||!r.plan) return;
     const key=String(ck)+"|"+lc(String(r.plan));
-    let e=idx.get(key); if(!e){ e={evs:new Map(), future:false, lastStart:null}; idx.set(key,e); }
+    let e=idx.get(key); if(!e){ e={evs:new Map(), future:false, lastStart:null, anyLast:false}; idx.set(key,e); }
     const evKey=lc(r.elevation||"");
     let ev=e.evs.get(evKey); if(!ev){ ev={label:String(r.elevation||"").trim(), released:null, trench:null}; e.evs.set(evKey,ev); }
     const rel=effective(r,"released"); if(rel && (!ev.released || rel<ev.released)) ev.released=rel;
     const tr=r.first_trench_date||null; if(tr && (!ev.trench || tr<ev.trench)) ev.trench=tr;
-    const last=r.last_trench_date||null; if(last && (!e.lastStart || last>e.lastStart)) e.lastStart=last;
+    const last=r.last_trench_date||null;
+    if(last){ e.anyLast=true; if(!e.lastStart || last>e.lastStart) e.lastStart=last; }
     if((tr && tr>=today) || (last && last>=today)) e.future=true;
   });
   idx.forEach(e=>{
     const evs=[...e.evs.values()].sort((a,b)=>a.label.localeCompare(b.label,undefined,{numeric:true}));
     e.list=evs; e.total=evs.length; e.done=evs.filter(v=>v.released).length;
-    const onLog = e.future || !hasLast;   // no latest-start data yet → can't call anything "off the log"
+    /* "Off the start log" requires evidence for THIS plan, not for the division.
+       This used to test a single division-wide boolean (`state.flow.some(r =>
+       r.last_trench_date)`), so the moment the first row in a division got a
+       last_trench_date, every plan that had none was declared red with the
+       tooltip asserting "Not on the start log from today forward" as fact — for
+       hundreds of plans the import had simply never mentioned. Absence of data is
+       not evidence of dropping off the log. No last_trench_date for this plan now
+       means unknown, which falls through to the released-based statuses.        */
+    const onLog = e.future || !e.anyLast;
     e.status = !onLog ? "off" : (e.total && e.done===e.total) ? "done" : e.done>0 ? "part" : "none";
   });
   return idx;
@@ -877,13 +1125,25 @@ function planTipHTML(entry, plan, planNm, commName){
     + (commName?`<div class="chip-tip-c">${esc(commName)}</div>`:"")
     + `<div class="chip-tip-st st-${st}">${stLine}</div>${rows}`;
 }
+/* The tooltip ELEMENT was guarded with if(!tip); the two listeners were not — and
+   `container` is #viewArea, which survives every render (only its innerHTML is
+   replaced). So every Plans render added another mouseover/mouseout pair, each
+   closing over a stale index. After 20 renders, hovering one chip did 20 tooltip
+   rebuilds and 60 forced layouts, and the stale closures pinned every previous
+   index in memory. That is the "it gets slower the longer I leave it open"
+   symptom. Wire once; keep the current index on the container so the single
+   handler always reads fresh data. */
 function attachChipTips(container, idx){
+  container._psIdx = idx;
   let tip=$("chipTip");
-  const hide=()=>tip.classList.add("hidden");
   if(!tip){ tip=document.createElement("div"); tip.id="chipTip"; tip.className="chip-tip hidden"; document.body.appendChild(tip);
     window.addEventListener("scroll",()=>tip.classList.add("hidden"),{passive:true}); }
+  if(container.dataset.chipTipsWired) return;
+  container.dataset.chipTipsWired="1";
+  const hide=()=>tip.classList.add("hidden");
   container.addEventListener("mouseover",e=>{
     const ch=e.target.closest(".chip[data-ttc]"); if(!ch) return;
+    const idx=container._psIdx; if(!idx) return;
     const entry=idx.get(ch.dataset.ttc+"|"+lc(ch.dataset.ttp)); if(!entry) return;
     tip.innerHTML=planTipHTML(entry, ch.dataset.ttp, ch.dataset.ttn||"", ch.dataset.ttx||"");
     tip.classList.remove("hidden");
@@ -1311,10 +1571,18 @@ function clearViewFilters(){
   state.filter=""; const gs=$("globalSearch"); if(gs) gs.value="";
   render();
 }
+/* Decorate-sort-undecorate. The comparator used to call val() — which for a blue
+   column is effective(), a business-day walk — for BOTH operands of every
+   comparison, so sorting 1591 rows meant ~34,000 date computations instead of
+   1,591. That was the single largest cost in a Tampa render, and because
+   state.sort is persisted to localStorage it was paid on every render forever
+   once a user had sorted by a calculated column. */
 function sortView(rows, cols){
   const s=getSort(); if(!s) return rows; const c=cols.find(x=>x.f===s.field); if(!c) return rows;
   const val=c.raw||c.disp||(r=>r[c.f]);
-  return rows.slice().sort((a,b)=>cmpVal(val(a),val(b))*s.dir);
+  const keyed=rows.map(r=>({r, k:val(r)}));          // one val() per row
+  keyed.sort((a,b)=>cmpVal(a.k,b.k)*s.dir);
+  return keyed.map(x=>x.r);
 }
 function distinctVals(rows, col){
   const f=colFval(col), set=new Set();
@@ -1346,7 +1614,7 @@ function theadHTML(cols, hasHandle){
 }
 /* ---- multi-select filter dropdown (msel), lazily built on open ---- */
 let _openMsel=null, _openMselW=null;
-let _mselWork=null, _mselAll=null, _mselCol=null, _mselDirty=false, _mselLock=null;
+let _mselWork=null, _mselAll=null, _mselAllSet=null, _mselCol=null, _mselDirty=false, _mselLock=null;
 /* Excel-style filter: a working selection Set drives everything. Typing in the search
    applies live (matches become the selection); "Add current selection to filter" makes a
    new search ADD its matches to what's already selected instead of replacing. */
@@ -1429,9 +1697,14 @@ function mselSearch(w,col){
   mselSyncBoxes(w); mselSyncMaster(w); mselCommit(w,col);
 }
 function mselCommit(w,col){
+  /* _mselAllSet, not _mselAll.includes(). _mselAll is an array of every option
+     value in the column, so .includes() inside this filter was a linear scan per
+     selected value — O(D²) where D is the distinct values in the column. D grows
+     with row count, so twice the rows was four times the work, and mselCommit
+     fires on every checkbox click AND every keystroke in the filter search. */
   const covered = _mselAll.length>0 && _mselAll.every(v=>_mselWork.has(v));
   if(covered || _mselWork.size===0) delete colFilterMap()[col.f];
-  else colFilterMap()[col.f]=new Set([..._mselWork].filter(v=>_mselAll.includes(v)));
+  else colFilterMap()[col.f]=new Set([..._mselWork].filter(v=>_mselAllSet.has(v)));
   const btn=w.querySelector("[data-mbtn]"); if(btn) btn.textContent=mselLabel(col);
   w.classList.toggle("active", colFilterMap()[col.f] instanceof Set);
   _mselDirty=true;
@@ -1439,7 +1712,7 @@ function mselCommit(w,col){
 function wireMselPanel(w, col){
   const panel=w.querySelector("[data-mpanel]");
   panel.addEventListener("click",e=>e.stopPropagation());
-  _mselCol=col; _mselAll=mselBoxes(w).map(b=>b.value); _mselLock=new Set();
+  _mselCol=col; _mselAll=mselBoxes(w).map(b=>b.value); _mselAllSet=new Set(_mselAll); _mselLock=new Set();
   const committed=colFilterMap()[col.f];
   _mselWork = (committed instanceof Set) ? new Set([...committed]) : new Set(_mselAll);
   mselSyncBoxes(w); mselSyncMaster(w);
@@ -1527,6 +1800,7 @@ function bindGrid(container, commit){
   const viewChanged = sheet.view!==state.view;
   sheet.view=state.view; sheet.container=container; sheet.commit=commit; sheet.drag=false; sheet.fill=false; sheet.fillTo=null;
   if(viewChanged){ sheet.anchor=null; sheet.focus=null; }
+  shInvalidate();   // the grid DOM was just replaced — drop the cached cell matrix
   attachSheetMouse(container);
   clampSel(); paintSelection();
 }
@@ -1588,10 +1862,36 @@ function startEdit(span, commit, after, prefill){
    fills down, Ctrl+R fills right, Delete clears. Drag the corner handle to fill down/up.
    Every write goes through the field-level save, so conflict protection + RLS apply. */
 let sheet={ view:null, container:null, commit:null, anchor:null, focus:null, drag:false, fill:false, fillTo:null };
-function shRows(c){ return [...c.querySelectorAll("table.grid tbody tr")].filter(tr=>tr.querySelector(".cell")); }
-function shDims(c){ const rows=shRows(c); return { R:rows.length, C:rows[0]?rows[0].querySelectorAll(".cell").length:0 }; }
-function shCell(c,r,cc){ const tr=shRows(c)[r]; return tr?(tr.querySelectorAll(".cell")[cc]||null):null; }
-function shCoord(cell){ const tr=cell.closest("tr"); const r=shRows(sheet.container).indexOf(tr); const c=[...tr.querySelectorAll(".cell")].indexOf(cell); return (r<0||c<0)?null:{r,c}; }
+/* The cell matrix, cached per grid build.
+
+   These four were each O(rows) per CALL, with no cache: one shRows() is a subtree
+   querySelectorAll plus an individual tr.querySelector(".cell") for every row —
+   1,591 of them for Tampa — and shCell then threw away all but one row. That made
+   paintSelection O(selectedCells × rows) and the drag handler, which repaints on
+   every mouseover, O(dragLength² × rows): dragging down 100 rows in Tampa was
+   ~8 million row scans. Every render paid it too, via clampSel + paintSelection,
+   even with a single cell selected.
+
+   shCache is invalidated by bindGrid after it writes innerHTML (the only place the
+   grid DOM is replaced), and defensively if the cached first row has been detached. */
+let _shCache=null;
+function shInvalidate(){ _shCache=null; }
+function shMatrix(c){
+  if(_shCache && _shCache.c===c && _shCache.rows.length && _shCache.rows[0].isConnected) return _shCache;
+  const rows=[...c.querySelectorAll("table.grid tbody tr")].filter(tr=>tr.querySelector(".cell"));
+  _shCache={ c, rows, cells:rows.map(tr=>[...tr.querySelectorAll(".cell")]) };
+  return _shCache;
+}
+function shRows(c){ return shMatrix(c).rows; }
+function shDims(c){ const m=shMatrix(c); return { R:m.rows.length, C:m.cells[0]?m.cells[0].length:0 }; }
+function shCell(c,r,cc){ const m=shMatrix(c); return (m.cells[r] && m.cells[r][cc]) || null; }
+function shCoord(cell){
+  const m=shMatrix(sheet.container);
+  const tr=cell.closest("tr");
+  const r=m.rows.indexOf(tr); if(r<0) return null;
+  const c=m.cells[r].indexOf(cell); if(c<0) return null;
+  return {r,c};
+}
 function selRect(){ const a=sheet.anchor, f=sheet.focus||sheet.anchor; return { r1:Math.min(a.r,f.r), c1:Math.min(a.c,f.c), r2:Math.max(a.r,f.r), c2:Math.max(a.c,f.c) }; }
 function clampSel(){ const {R,C}=shDims(sheet.container); if(!sheet.anchor) return; if(R===0||C===0){ sheet.anchor=sheet.focus=null; return; }
   const cl=p=>{ p.r=Math.max(0,Math.min(p.r,R-1)); p.c=Math.max(0,Math.min(p.c,C-1)); }; cl(sheet.anchor); if(sheet.focus) cl(sheet.focus); }
@@ -1634,14 +1934,17 @@ function editActive(prefill){
   if(!cell.matches(".editable")) return;
   startEdit(cell, sheet.commit, dir=>{ if(dir) moveActive(dir,false); else paintSelection(); }, prefill);
 }
-async function applyBulk(view, field, type, edits){
-  if(!edits.length) return;
-  if(edits.length>500){ toast("That's over 500 cells — please work in a smaller range.","err"); return; }
+/* `defer` suppresses the render so runEdits can render ONCE after every field,
+   instead of once per field — a 14-column paste used to rebuild the whole grid 14
+   times. The 500-cell cap is enforced by the caller now, across all fields. */
+async function applyBulk(view, field, type, edits, opts){
+  if(!edits.length) return 0;
   const table=view==="flow"?"flow_rows":"takeoff_changes";
   const arr=view==="flow"?state.flow:state.changes;
+  const byId=new Map(arr.map(r=>[r.id,r]));   // was arr.find() per edit: O(edits × rows)
   let conflicts=0; const before=[];   // {id, prev} for successfully-changed cells (for undo)
   for(const {id,value} of edits){
-    const r=arr.find(x=>x.id===id); if(!r) continue;
+    const r=byId.get(id); if(!r) continue;
     const oldVal=r[field]===undefined?null:r[field];
     const newVal=(value===""||value==null)?null:value;
     if(sameVal(oldVal,newVal)) continue;
@@ -1650,23 +1953,66 @@ async function applyBulk(view, field, type, edits){
     if(res && res.ok===false && "current" in res){ r[field]=res.current; conflicts++; }
     else before.push({id, prev:oldVal});
   }
-  if(view==="flow" && before.length){
+  /* Undo is recorded for BOTH views now. The Takeoff Changes tab has had the full
+     sheet model (Delete, Ctrl+D, Ctrl+R, fill, paste) since bindGrid covered it,
+     but undo was recorded only for `flow` and the Undo button was only rendered on
+     the Flow tab — so a Delete over a block of Takeoff Changes blanked up to 500
+     cells per column permanently with nothing to press.
+
+     It also goes through saveField rather than savePatch, so undoing a cell a
+     colleague has since corrected is refused rather than silently overwriting
+     their value. */
+  if(before.length){
+    const undoArr=()=>view==="flow"?state.flow:state.changes;
     pushUndo({ label:`${field.replace(/_/g," ")} × ${before.length}`, undo:async()=>{
-      for(const b of before){ const rr=state.flow.find(x=>x.id===b.id); if(rr) rr[field]=b.prev; }
-      for(const b of before){ await savePatch("flow_rows", b.id, {[field]:b.prev}); }
+      const m=new Map(undoArr().map(r=>[r.id,r]));
+      let refused=0;
+      for(const b of before){
+        const rr=m.get(b.id);
+        const cur=rr?(rr[field]===undefined?null:rr[field]):null;
+        const res=await saveField(table, b.id, field, b.prev, cur);
+        if(res && res.ok===false && "current" in res){ if(rr) rr[field]=res.current; refused++; }
+        else if(rr) rr[field]=b.prev;
+      }
+      clearEffCache();
+      if(refused) toast(refused+" cell(s) not undone — changed by someone else since.","err");
     }});
   }
-  render();
+  clearEffCache();
+  if(!(opts&&opts.defer)) render();
   if(conflicts) toast(conflicts+" cell(s) weren't saved — changed by someone else. Latest values shown.","err");
+  return conflicts;
 }
 function collectEdits(cells){ const byField={};
   cells.forEach(({el,value})=>{ if(!el||!el.matches(".editable,.editallowed")) return; const field=el.dataset.field,type=el.dataset.type||"text";
     (byField[field]=byField[field]||{type,list:[]}).list.push({id:el.dataset.id, value:normVal(type,value)}); });
   return byField;
 }
-async function runEdits(byField){ for(const f in byField) await applyBulk(sheet.view,f,byField[f].type,byField[f].list); }
+/* The 500-cell cap lives HERE, across every field, because it used to be inside
+   applyBulk — which runs once per column. A 14-column × 400-row paste was 5,600
+   cells that each passed a per-column check of 400, and then made 5,600 serial
+   round trips with no progress and no cancel. Renders once at the end, not per
+   field. */
+async function runEdits(byField){
+  const fields=Object.keys(byField);
+  const total=fields.reduce((n,f)=>n+byField[f].list.length,0);
+  if(!total) return;
+  if(total>500){
+    toast(`That's ${total.toLocaleString()} cells across ${fields.length} column(s) — over the 500 limit. Please work in a smaller range.`,"err");
+    return;
+  }
+  for(const f of fields) await applyBulk(sheet.view,f,byField[f].type,byField[f].list,{defer:true});
+  render();
+}
+/* Confirm a large clear. Delete over a block had no prompt at all, and on the
+   Takeoff Changes tab it also had no undo — so a stray keypress blanked requestor,
+   community, plan and request text across hundreds of rows permanently. Undo is
+   recorded for both views now (see applyBulk), but a destructive bulk action this
+   easy to trigger should still ask. */
 async function clearSelection(){ const s=selRect(), cells=[];
   for(let r=s.r1;r<=s.r2;r++) for(let cc=s.c1;cc<=s.c2;cc++){ const el=shCell(sheet.container,r,cc); if(el) cells.push({el,value:""}); }
+  const editable=cells.filter(c=>c.el && (c.el.matches(".editable")||c.el.matches(".editallowed"))).length;
+  if(editable>20 && !confirm(`Clear ${editable} cell(s)?\n\nThis blanks them for everyone. You can undo it from the Undo button, but only in this browser session.`)) return;
   await runEdits(collectEdits(cells)); }
 async function fillDir(dir){ const s=selRect(), cells=[];
   if(dir==="down"){ if(s.r2<=s.r1) return; for(let cc=s.c1;cc<=s.c2;cc++){ const src=shCell(sheet.container,s.r1,cc); if(!src) continue; const v=cellSaveVal(src);
@@ -1681,13 +2027,39 @@ async function doHandleFill(toRow){ if(toRow==null||!sheet.anchor) return; const
 function selTSV(){ const s=selRect(), lines=[];
   for(let r=s.r1;r<=s.r2;r++){ const parts=[]; for(let cc=s.c1;cc<=s.c2;cc++){ const el=shCell(sheet.container,r,cc); parts.push(el?(el.querySelector(".val")?.textContent||""):""); } lines.push(parts.join("\t")); }
   return lines.join("\n"); }
+/* Paste is positional — it addresses rows by their on-screen position, because
+   shRows reads the rendered tbody, which renderFlow built from
+   sortView(passFilters(...)). There is no row-identity check, and there cannot
+   really be one in a spreadsheet UI: pasting a block into the visible grid is what
+   the gesture means.
+
+   What makes it dangerous is doing it into a REORDERED view. Sort by Community,
+   paste a column of dates copied from an export in a different order, and the
+   dates land on the wrong plans — silently recomputing six derived dates each.
+   applyBulk writes every cell whose value differs, so most of them do change, and
+   it reports only conflicts, never "these went somewhere you didn't expect".
+
+   So: confirm when a sort or a filter is active, and say which. Also report
+   clipped cells instead of discarding them silently. */
 async function doPaste(txt){ const c=sheet.container; if(!sheet.anchor) return;
   const matrix=txt.replace(/\r\n?/g,"\n").split("\n"); if(matrix.length && matrix[matrix.length-1]==="") matrix.pop();
   const {R,C}=shDims(c), sr=sheet.anchor.r, sc=sheet.anchor.c, cells=[];
-  matrix.forEach((line,ri)=>line.split("\t").forEach((val,ci)=>{ const r=sr+ri, cc=sc+ci; if(r>=R||cc>=C) return; cells.push({el:shCell(c,r,cc),value:val}); }));
+  let clipped=0;
+  matrix.forEach((line,ri)=>line.split("\t").forEach((val,ci)=>{ const r=sr+ri, cc=sc+ci;
+    if(r>=R||cc>=C){ clipped++; return; } cells.push({el:shCell(c,r,cc),value:val}); }));
+  if(!cells.length){ toast("Nothing pasted — the selection start is outside the grid.","err"); return; }
+  const s=getSort(), reordered=!!s, filtered=anyFilters();
+  if(reordered || filtered){
+    const why=[reordered?"sorted":"", filtered?"filtered":""].filter(Boolean).join(" and ");
+    if(!confirm(`This view is ${why}, so the rows are not in their underlying order.\n\n`
+      + `Pasting ${cells.length} cell(s) writes them to the rows in the order shown on screen — `
+      + `if your clipboard is in a different order, values will land on the wrong rows.\n\n`
+      + `Paste anyway?`)) return;
+  }
   const pr=matrix.length-1, pc=Math.max(...matrix.map(l=>l.split("\t").length))-1;
   sheet.anchor={r:sr,c:sc}; sheet.focus={r:Math.min(R-1,sr+pr),c:Math.min(C-1,sc+pc)};
-  await runEdits(collectEdits(cells)); }
+  await runEdits(collectEdits(cells));
+  if(clipped) toast(`${clipped} pasted cell(s) fell outside the grid and were not written.`,"err"); }
 /* The container (#viewArea) outlives every render — only its innerHTML is replaced — so these
    listeners are wired ONCE and delegate off the live `sheet` model (container/commit/anchor are
    refreshed by bindGrid on each render). Re-attaching per render stacked a duplicate set every
@@ -1758,15 +2130,48 @@ function setLive(status){
 async function startRealtime(){
   if(DEMO){ setLive(); return; }
   if(!sb || _rt) return;
-  try{ const { data } = await sb.auth.getSession(); const tok=data&&data.session&&data.session.access_token;
-    if(tok && sb.realtime && sb.realtime.setAuth) sb.realtime.setAuth(tok); }catch(e){}
-  const tables=["flow_rows","pending_budget_cols","pending_budget_checks","pending_budget_status","takeoff_changes","tf_plan_names","tf_change_log","tf_loc_locks"];
+  await rtAuth();
+  /* Re-auth the socket when the JWT rotates. setAuth was called once at boot and
+     never again: the token expires in about an hour, TOKEN_REFRESHED is routed
+     into onSignedIn which returns immediately on its _entered guard, so live
+     updates could simply stop while the grid looked completely normal. That
+     widens the window for every stale-cache write in the app. */
+  try{ sb.auth.onAuthStateChange((ev)=>{ if(ev==="TOKEN_REFRESHED") rtAuth(); }); }catch(e){}
+  /* Tables carrying a division column are filtered SERVER-SIDE. Without this a
+     Tampa user received every Orlando flow_rows event, and each one cost them a
+     full state.flow.filter() — a 1591-element array copy per foreign edit. The
+     two pending_budget_* tables have no division column, so they cannot be
+     filtered here; onRemote discards them by flow id instead. */
+  const scoped=["flow_rows","pending_budget_cols","takeoff_changes","tf_plan_names"];
+  const global=["pending_budget_checks","pending_budget_status","tf_change_log","tf_loc_locks"];
   let ch=sb.channel("tf-live");
-  tables.forEach(t=>{ ch=ch.on("postgres_changes",{event:"*",schema:"public",table:t},p=>onRemote(t,p)); });
+  scoped.forEach(t=>{ ch=ch.on("postgres_changes",{event:"*",schema:"public",table:t,filter:"division=eq."+state.divKey},p=>onRemote(t,p)); });
+  global.forEach(t=>{ ch=ch.on("postgres_changes",{event:"*",schema:"public",table:t},p=>onRemote(t,p)); });
   ch.subscribe(status=>setLive(status)); _rt=ch;
 }
+async function rtAuth(){
+  try{ const { data } = await sb.auth.getSession(); const tok=data&&data.session&&data.session.access_token;
+    if(tok && sb.realtime && sb.realtime.setAuth) sb.realtime.setAuth(tok); }catch(e){ console.warn("realtime auth failed",e); }
+}
+/* The division filter is baked into the subscription, so a division switch needs a
+   fresh channel or the user keeps receiving the old division's events and none of
+   the new one's. */
+async function restartRealtime(){
+  if(DEMO || !sb) return;
+  if(_rt){ try{ await sb.removeChannel(_rt); }catch(e){} _rt=null; }
+  await startRealtime();
+}
+/* Is this flow_id one of the rows currently loaded? Used to discard realtime
+   events for the tables that have no division column of their own. */
+function rowLoaded(flow_id){
+  if(!flow_id) return false;
+  if(!_loadedIds || _loadedIdsFor!==state.flow){ _loadedIds=new Set(state.flow.map(r=>r.id)); _loadedIdsFor=state.flow; }
+  return _loadedIds.has(flow_id);
+}
+let _loadedIds=null, _loadedIdsFor=null;
 function onRemote(table, p){
   const ev=p.eventType||p.event, row=(p.new && Object.keys(p.new).length)?p.new:null, old=p.old||{};
+  clearEffCache();   // a remote row changed; memoised calc dates for it are stale
   if(table==="flow_rows"){
     if(ev==="DELETE") state.flow=state.flow.filter(x=>x.id!==old.id);
     else if(row){ if(row.division!==state.divKey) state.flow=state.flow.filter(x=>x.id!==row.id);
@@ -1775,10 +2180,19 @@ function onRemote(table, p){
     if(ev==="DELETE") state.cols=state.cols.filter(x=>x.id!==old.id);
     else if(row){ if(row.division!==state.divKey) state.cols=state.cols.filter(x=>x.id!==row.id);
       else { const i=state.cols.findIndex(x=>x.id===row.id); if(i>=0) state.cols[i]=row; else { state.cols.push(row); state.cols.sort(bySort); } } }
+  /* These two tables carry no division column, so the subscription cannot filter
+     them server-side — discard by flow id here instead. Previously every tick in
+     another division was written into state.checks / state.status and triggered a
+     re-render of this division's grid, and the foreign keys stayed in local state
+     polluting it (loadDivision filters by id on load; onRemote did not). */
   } else if(table==="pending_budget_checks"){
+    const fid=(ev==="DELETE"?old:row||{}).flow_id;
+    if(!rowLoaded(fid)) return;
     if(ev==="DELETE") delete state.checks[old.flow_id+"::"+old.col_id];
     else if(row) state.checks[row.flow_id+"::"+row.col_id]=!!row.checked;
   } else if(table==="pending_budget_status"){
+    const fid=(ev==="DELETE"?old:row||{}).flow_id;
+    if(!rowLoaded(fid)) return;
     if(ev==="DELETE") delete state.status[old.flow_id];
     else if(row) state.status[row.flow_id]={sim_reviewed:!!row.sim_reviewed, sent_to_loc:!!row.sent_to_loc};
   } else if(table==="takeoff_changes"){
@@ -1922,10 +2336,35 @@ function parseStartSchedule(wb, div){
     if(typeof v==="number"){ const d=XLSX.SSF?XLSX.SSF.parse_date_code(v):null; if(d) return `${d.y}-${String(d.m).padStart(2,"0")}-${String(d.d).padStart(2,"0")}`; }
     const d=new Date(v); return isNaN(d)?null:d.toISOString().slice(0,10); };
   const find=n=>wb.SheetNames.find(s=>lc(s)===lc(n));
+  /* REQUIRE the division's own tab. The old chain fell through to the other
+     division's tab and finally to wb.SheetNames[0], so dropping a Tampa workbook
+     with Orlando selected parsed Tampa's Start Log into Orlando: every combination
+     looked new, the preview read "for orlando" and looked entirely plausible, and
+     publishing wrote Tampa's communities in with division:"orlando" — where
+     Tampa's own editors cannot even fix them, because flow_upd is division-scoped.
+     One mis-drag. The SheetNames[0] fallback generalised the same hazard to any
+     workbook missing all three named tabs.
+
+     Throwing here is caught by loadStartsFile, which shows the message. */
   const want = div==="orlando" ? "Permit Log" : div==="tampa" ? "Start Log" : null;
-  const sheet = (want && find(want)) || find("Permit Log") || find("Start Log") || find("START SCHEDULE") || wb.SheetNames[0];
+  const sheet = (want && find(want)) || (!want && (find("Permit Log") || find("Start Log") || find("START SCHEDULE")));
+  if(!sheet){
+    throw new Error(want
+      ? `This workbook has no "${want}" tab, so it doesn't look like a ${div} Starts Log. `
+        + `It contains: ${wb.SheetNames.slice(0,8).join(", ")}${wb.SheetNames.length>8?", …":""}. `
+        + `Check you picked the right division and the right file.`
+      : `No "Permit Log", "Start Log" or "START SCHEDULE" tab in this workbook.`);
+  }
   const rows=XLSX.utils.sheet_to_json(wb.Sheets[sheet],{defval:null});
-  const commNum=r=>{ const job=digits(r["Job"]); return job.length>=7 ? job.slice(0,7)+"0000" : (S(r["Comm"])||""); };  // first 7 digits = community (handles model/spec jobs like 1116272S111)
+  /* community_num must be a NUMBER. The old fallback returned S(r["Comm"]) — which
+     holds the community NAME (the next line uses it as one) — so any OLH row with
+     a short or blank Job produced community_num:"BronsonRidge 60". The dedupe key
+     is [community_num, plan, elevation], so such a row never matches the
+     numerically-keyed existing row and inserts a duplicate with a name sitting in
+     the Comm # column, which then collides again on every later import. Count it
+     as skipped instead. */
+  let skipped=0;
+  const commNum=r=>{ const job=digits(r["Job"]); return job.length>=7 ? job.slice(0,7)+"0000" : ""; };  // first 7 digits = community (handles model/spec jobs like 1116272S111)
   // Pre-count building sizes so plex lots become "{N}-PLEX". Count units per PHYSICAL
   // building = community + building id. (Community is already in the key, so reused
   // building ids across communities don't collide.) We deliberately do NOT split by
@@ -1951,13 +2390,13 @@ function parseStartSchedule(wb, div){
       num = commNum(r); plan = S(r["Plan"]); ev = S(r["EV"])||S(r["Elevation"]);
       trench = xlDate(r["ActStart"])||xlDate(r["PrjStart"]);
       noteName(num,comm);
-    } else continue;
+    } else { skipped++; continue; }
     // plex transform: buildings → "{units}-PLEX", elevation → first letter (matches the Flow grid).
     const bp=isPlexBldg(bldg);                // only Z-prefixed buildings are plexes
     const srcPlan=plan;                       // the real plan on this lot (e.g. H009)
     if(bp){ const cnt=bldgCount[num+"|"+bldg]; if(cnt) plan=cnt+"-PLEX"; if(ev) ev=ev.charAt(0); }
     const name = comm || idName[num] || num;
-    if(!num || !plan) continue;
+    if(!num || !plan){ skipped++; continue; }
     const add=(planLabel, evv)=>{ if(!planLabel) return; const key=[num,lc(planLabel),lc(evv||"")].join("|");
       if(!groups.has(key)) groups.set(key,{ community_name:name, community_num:num, plan:planLabel, elevation:evv, first_trench_date:trench, last_trench_date:trench });
       else{ const g=groups.get(key); if(trench){
@@ -1972,13 +2411,45 @@ function parseStartSchedule(wb, div){
   for(const num in nameCount){ let best=null, bn=-1; for(const nm in nameCount[num]){ if(nameCount[num][nm]>bn){ bn=nameCount[num][nm]; best=nm; } } canon[num]=best; }
   const out=[...groups.values()];
   out.forEach(g=>{ const c=canon[g.community_num]; if(c) g.community_name=c; });
+  /* Report what was dropped, and refuse outright when NOTHING parsed.
+     sheet_to_json takes its keys from the first row, so a workbook with a title
+     line above the header, or "Job #" instead of "Job", matched none of the format
+     branches above and every row hit `continue` — yielding zero rows and a preview
+     that read "Parsed 0 combination(s) — nothing new to add and nothing changed",
+     which an admin reasonably reads as "this log has no new work". Silence is the
+     wrong answer to a file we could not understand. */
+  if(rows.length && !out.length){
+    throw new Error(`Read ${rows.length} row(s) from the "${sheet}" tab but recognised none of them. `
+      + `Expected either a Comm/Job/Plan/EV layout or a Project/Job/Plan/EV one; found columns: `
+      + `${Object.keys(rows[0]||{}).slice(0,10).join(", ")||"(none)"}. `
+      + `Usually a title row above the header, or a renamed column.`);
+  }
+  out._skipped=skipped;
+  out._sheet=sheet;
   return out;
 }
 async function buildImportPreview(){
   const div=$("adminDiv").value;
   const isFlow=importState.kind==="flow";
   const proposed=isFlow?parseFlowWorkbook(importState.wb):parseStartSchedule(importState.wb, div);
-  const existRows=await existingFlow(div);   // always compare against the TARGET division's rows in the DB
+  /* If we cannot read what already exists, there is no safe preview to show. Every
+     row we failed to read would be reported as new and inserted a second time, and
+     the preview would say so with total confidence ("N new row(s) · 0 already
+     exist"). Refuse rather than offer a Publish button over a partial diff. */
+  let existRows;
+  try{
+    existRows=await existingFlow(div);   // always compare against the TARGET division's rows in the DB
+  }catch(e){
+    console.error("import preview: could not read existing rows", e);
+    const panel=$("previewPanel"), body=$("previewBody");
+    panel.classList.remove("hidden");
+    body.innerHTML=`<p class="tiny" style="text-align:left"><b>Couldn't read the existing ${esc(div)} rows, so there is nothing safe to preview.</b></p>`
+      + `<p class="tiny" style="text-align:left">${esc(e.message||String(e))}</p>`
+      + `<p class="tiny" style="text-align:left">An import decides what is new by comparing the file against what is already in the grid. `
+      + `On a partial read every row it failed to see counts as new and gets inserted again — that is how duplicate rows are created. `
+      + `Re-drop the file once this loads.</p>`;
+    return;
+  }
   // A combination = community NUMBER + plan + elevation. Only genuinely new combinations are added.
   // Plex plans are normalized (the "{N}-PLEX" unit count is unreliable between the log and the grid),
   // so a plex is matched by community + "PLEX" + elevation.
@@ -2028,7 +2499,19 @@ async function buildImportPreview(){
   const panel=$("previewPanel"), body=$("previewBody");
   panel.classList.remove("hidden");
   const src=isFlow?"FLOW OF TAKEOFFS workbook":"Starts Log";
-  if(!fresh.length && !updates.length && !lastUpd.size){ body.innerHTML=`<p class="tiny" style="text-align:left">Parsed ${proposed.length} combination(s) from the ${src} — nothing new to add and nothing changed in ${esc(div)}.</p>`; return; }
+  /* The dropped-lot count used to be invisible: `proposed.length` is the count
+     AFTER rows with a blank/short job number or no plan were skipped, so a log
+     half of whose lots were unusable reported a clean, confident total. */
+  const skipped=proposed._skipped||0;
+  const sheetNm=proposed._sheet?` ("${esc(proposed._sheet)}" tab)`:"";
+  const skipNote=skipped
+    ? `<div class="tiny" style="text-align:left;margin:6px 0 0"><b>${skipped} row(s) in the file were skipped</b> — no usable community number (Job) or no plan. `
+      + `They are not in the counts below and will not be imported.</div>`
+    : "";
+  if(!fresh.length && !updates.length && !lastUpd.size){
+    body.innerHTML=`<p class="tiny" style="text-align:left">Parsed ${proposed.length} combination(s) from the ${src}${sheetNm} — nothing new to add and nothing changed in ${esc(div)}.</p>`+skipNote;
+    return;
+  }
   // ---- change summary ----
   const byComm=new Map();
   fresh.forEach(r=>byComm.set(r.community_name,(byComm.get(r.community_name)||0)+1));
@@ -2044,6 +2527,7 @@ async function buildImportPreview(){
   let h=`<div class="import-summary">
     <div class="is-row">${fresh.length?`<span class="is-n">${fresh.length}</span> new row(s)`:""}${fresh.length&&updates.length?" &nbsp;·&nbsp; ":""}${updates.length?`<span class="is-n">${updates.length}</span> trench update(s)`:""} for <b>${esc(div)}</b></div>
     <div class="tiny" style="text-align:left;margin:2px 0 0">${proposed.length} parsed · ${proposed.length-fresh.length} already exist${newComms.length?` · <b>${newComms.length} new communities</b>`:""}</div>
+    ${skipNote}
     ${newComms.length?`<div class="tiny" style="text-align:left;margin:6px 0 0">New communities: ${newComms.slice(0,12).map(esc).join(", ")}${newComms.length>12?` +${newComms.length-12} more`:""}</div>`:""}
     <div class="tiny" style="text-align:left;margin:6px 0 0">Each plex building adds an N-PLEX line <b>plus a line for every plan in it</b> (e.g. H009, N122). Existing rows are only changed when the earliest First Trench date moved (below).</div>
     ${lastUpd.size?`<div class="tiny" style="text-align:left;margin:6px 0 0">Also refreshes the <b>latest start date</b> on ${lastUpd.size} matched row(s) — this is what marks a plan red on the Plans tab when it has no starts from today forward.</div>`:""}
@@ -2067,9 +2551,14 @@ async function buildImportPreview(){
   body.innerHTML=h;
   $("publishImport").onclick=async()=>{ await publishImport(div, fresh, updates, lastUpd, importState.summary, importState.detail); };
 }
+/* The set the import diffs against. A SHORT ANSWER HERE INSERTS DUPLICATES: every
+   existing row this fails to return is classified as new and re-added. sbAll now
+   throws rather than returning a partial page, and callers must let that propagate
+   rather than treating it as "nothing exists yet". Ordered by id for the same
+   reason every other pager is — see sbAll. */
 async function existingFlow(div){
   if(DEMO) return MEM.flow_rows.filter(r=>r.division===div);
-  return await sbAll(()=>sb.from("flow_rows").select("id,community_name,community_num,plan,elevation,first_trench_date,last_trench_date,plan_name,sort_order").eq("division",div));
+  return await sbAll(()=>sb.from("flow_rows").select("id,community_name,community_num,plan,elevation,first_trench_date,last_trench_date,plan_name,sort_order").eq("division",div), "id");
 }
 /* One request per 500 rows instead of one per row. `op` is "insert" or "upsert". */
 async function sbBulk(op, table, rows, extra){
@@ -2089,13 +2578,39 @@ async function publishImport(div, fresh, updates, lastUpd, summary, detail){
     // build all new rows up front
     const newRows=fresh.map(p=>{ const row={ id:uid(), division:div, sort_order:++n, updated_at:now, updated_by:state.email };
       for(const k in p){ if(k!=="id"&&k!=="division"&&k!=="sort_order") row[k]=p[k]; } return row; });
-    // partial upsert for existing-row changes: id + division (NOT NULL) + only the changed
-    // fields (First Trench and/or plex plan list). One row per id so the batch never
-    // touches the same row twice.
+    /* Partial upsert for existing-row changes: id + division (NOT NULL) + the two
+       trench dates. One row per id so the batch never touches the same row twice.
+
+       EVERY OBJECT IN THIS ARRAY MUST CARRY THE SAME KEYS. This used to set
+       first_trench_date / last_trench_date only when that one had moved, which
+       looked like a tidy partial write and was in fact a data-loss bug.
+       postgrest-js resolves a mixed-key array by taking the UNION of all keys and
+       sending it as ?columns=  (see @supabase/postgrest-js upsert()). That is what
+       avoids PostgREST's "All object keys must match" error — so nothing errors.
+       Instead, for an object missing a key in that union, PostgREST writes NULL,
+       and resolution=merge-duplicates applies it. A row whose only change was
+       last_trench_date therefore had first_trench_date overwritten with NULL —
+       the column every calculated date derives from.
+
+       It was not hypothetical: one Orlando import on 2026-09-14 nulled
+       first_trench_date on 26 rows across CROSSPRARIE 50GC, Wellness 22GC,
+       Springhead 25GC, Harvest Grove and others, blanking all six of their
+       calculated columns. Nothing errored and nobody was told. It self-healed
+       partially because the next import saw the NULL and restored it, while
+       nulling a different set — so the dates churned on every run.
+
+       So: carry both columns on every row, falling back to the row's CURRENT
+       value when this import did not move that date. Same fix in blueprint/db.js.
+       Anything added here must be added to both, per the root README.           */
+    const curById=new Map(existRows.map(r=>[r.id,r]));
     const byId=new Map(); (updates||[]).forEach(u=>byId.set(u.id,{id:u.id, trTo:u.trTo}));
     if(lastUpd) lastUpd.forEach((lt,id)=>{ const cur=byId.get(id)||{id}; cur.lastTo=lt; byId.set(id,cur); });
-    const updRows=[...byId.values()].map(u=>{ const row={ id:u.id, division:div, updated_at:now, updated_by:state.email };
-      if(u.trTo) row.first_trench_date=u.trTo; if(u.lastTo) row.last_trench_date=u.lastTo; return row; });
+    const updRows=[...byId.values()].map(u=>{
+      const cur=curById.get(u.id)||{};
+      return { id:u.id, division:div, updated_at:now, updated_by:state.email,
+               first_trench_date: u.trTo  || cur.first_trench_date || null,
+               last_trench_date:  u.lastTo || cur.last_trench_date  || null };
+    });
     if(DEMO){
       newRows.forEach(r=>MEM.flow_rows.push(r));
       updRows.forEach(d=>{ const r=MEM.flow_rows.find(x=>x.id===d.id); if(r){ if(d.first_trench_date!==undefined) r.first_trench_date=d.first_trench_date; if(d.last_trench_date!==undefined) r.last_trench_date=d.last_trench_date; if(d.plan_name!==undefined) r.plan_name=d.plan_name; } });
@@ -2106,7 +2621,7 @@ async function publishImport(div, fresh, updates, lastUpd, summary, detail){
     await logChange(div, summary||`Imported ${fresh.length} row(s) into ${div}`, detail);
     adminMsg(`Published ${fresh.length} new row(s)${(updates&&updates.length)?` and updated ${updates.length} existing row(s)`:""} in ${div}.`,"ok");
     $("previewPanel").classList.add("hidden"); $("tileStarts").classList.remove("filled"); $("startsName").textContent="Drop the Starts Log .xlsx here or click to browse";
-    if(div===state.divKey){ await loadDivision(div); render(); }   // reload once, not per row
+    if(div===state.divKey){ await loadDivisionGuarded(div); render(); }   // reload once, not per row
   }catch(e){
     adminMsg("Publish failed: "+(e.message||e),"err"); $("publishImport").disabled=false;
   }
@@ -2193,10 +2708,15 @@ async function renderPerms(){
     }catch(e){ console.warn("tf_admin_list_users failed, using tf_app_roles only",e); }
     // Always merge in tf_app_roles rows so people who were given a role but don't have a
     // login account yet (e.g. Tampa editors added before their first sign-in) still appear.
-    try{ const { data }=await sb.from("tf_app_roles").select("email,role,divisions").order("email");
+    /* Paged. Unpaginated this capped at 1000 with no error, so past that an admin
+       simply could not see — or revoke — a user in Access & permissions. Latent at
+       current scale, silent when it isn't. supabase-js resolves with {data,error}
+       rather than rejecting, so the bare catch never fired either. */
+    try{
+      const roleRows=await sbAll(()=>sb.from("tf_app_roles").select("email,role,divisions"), "email");
       const have=new Set(list.map(u=>lc(u.email)));
-      (data||[]).forEach(r=>{ if(!have.has(lc(r.email))) list.push({email:r.email, role:r.role, divisions:r.divisions||[]}); });
-    }catch(e){}
+      roleRows.forEach(r=>{ if(!have.has(lc(r.email))) list.push({email:r.email, role:r.role, divisions:r.divisions||[]}); });
+    }catch(e){ console.error("role list load failed",e); toast("Couldn't load the full role list — some users may be missing below.","err"); }
     list.sort((a,b)=>String(a.email).localeCompare(String(b.email)));
     state.users=list;
   }

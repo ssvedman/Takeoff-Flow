@@ -15,3 +15,6 @@ SETUP.md
 
 # Supabase email template — configured in the Supabase dashboard, not shipped
 otp_email_template.html
+one_off_remove_spurious_change_log.sql
+one_off_dedupe_tampa.sql
+verify_flow_rows.sql
