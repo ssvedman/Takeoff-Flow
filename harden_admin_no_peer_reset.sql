@@ -17,8 +17,8 @@ create or replace function public.is_admin_email(p_email text) returns boolean
  select exists(select 1 from public.app_roles     where lower(email)=lower(p_email) and role='admin')
      or exists(select 1 from public.tf_app_roles  where lower(email)=lower(p_email) and role='admin')
      or exists(select 1 from public.cdb_app_roles where lower(email)=lower(p_email) and role='admin') $$;
-revoke all on function public.is_admin_email(text) from public;
-grant execute on function public.is_admin_email(text) to authenticated;
+-- Only the SECURITY DEFINER issuers call this (as owner); no external role needs it.
+revoke all on function public.is_admin_email(text) from public, anon, authenticated;
 
 -- Vendor Portal issuer (pool A)
 create or replace function public.admin_add_or_reset(target_email text)
@@ -70,4 +70,39 @@ declare v_email text := lower(target_email); v_id uuid; v_token text; v_created 
   insert into public.password_reset_tokens (token, email, created_by, expires_at)
   values (encode(extensions.digest(v_token, 'sha256'), 'hex'), v_email, public.tf_email(), now() + interval '24 hours');
   return json_build_object('token', v_token, 'created', v_created);
+end; $function$;
+
+-- ============================================================================
+--  DELETE path — same rule as reset: an admin cannot DELETE another admin.
+--  auth.users is shared, and admin_delete_user / tf_admin_delete_user remove the
+--  shared row across all apps. Without this, a single-app admin could delete a
+--  peer admin (or the suite super-admin) of another app. Self-delete is already
+--  blocked by these functions; this adds the peer-admin block.
+-- ============================================================================
+create or replace function public.admin_delete_user(target_email text)
+ returns json language plpgsql security definer set search_path to '' as $function$
+declare v_email text := lower(target_email); begin
+  if public.my_role() <> 'admin' then raise exception 'not authorized'; end if;
+  if v_email = lower(public.jwt_email()) then return json_build_object('ok', false, 'error', 'You cannot remove your own account.'); end if;
+  if public.is_admin_email(v_email) then return json_build_object('ok', false, 'error', 'Cannot delete another admin''s account.'); end if;
+  delete from public.app_roles where lower(email) = v_email;
+  if to_regclass('public.tf_app_roles') is not null then delete from public.tf_app_roles where lower(email) = v_email; end if;
+  delete from public.password_reset_tokens where lower(email) = v_email;
+  delete from auth.users where lower(email) = v_email;
+  if not found then return json_build_object('ok', false, 'error', 'No account with that email.'); end if;
+  return json_build_object('ok', true);
+end; $function$;
+
+create or replace function public.tf_admin_delete_user(target_email text)
+ returns json language plpgsql security definer set search_path to '' as $function$
+declare v_email text := lower(target_email); begin
+  if public.tf_role() <> 'admin' then raise exception 'not authorized'; end if;
+  if v_email = public.tf_email() then return json_build_object('ok', false, 'error', 'You cannot remove your own account.'); end if;
+  if public.is_admin_email(v_email) then return json_build_object('ok', false, 'error', 'Cannot delete another admin''s account.'); end if;
+  delete from public.tf_app_roles where lower(email) = v_email;
+  if to_regclass('public.app_roles') is not null then delete from public.app_roles where lower(email) = v_email; end if;
+  if to_regclass('public.password_reset_tokens') is not null then delete from public.password_reset_tokens where lower(email) = v_email; end if;
+  delete from auth.users where lower(email) = v_email;
+  if not found then return json_build_object('ok', false, 'error', 'No account with that email.'); end if;
+  return json_build_object('ok', true);
 end; $function$;

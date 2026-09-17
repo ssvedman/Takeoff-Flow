@@ -1,3 +1,9 @@
+-- !! SECURITY: this file re-defines admin_add_or_reset / tf_admin_add_or_reset
+-- !! WITHOUT the peer-admin guard. After running it you MUST run
+-- !! harden_admin_no_peer_reset.sql (idempotent) or an admin can reset/delete
+-- !! another admin across the shared auth.users. Do not leave this file as the
+-- !! last word on those functions.
+
 -- ============================================================================
 --  HARDEN POOL A RESET TOKENS — store SHA-256 hashes, never plaintext
 --  (Pool A = public.password_reset_tokens, shared by Takeoff Flow, the Vendor
