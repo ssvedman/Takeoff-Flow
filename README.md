@@ -9,7 +9,20 @@ companion to the Vendor Assignments Portal, based on the "FLOW OF TAKEOFFS" work
 - Division selector (Tampa, Orlando)
 - Four tabs:
   - **Flow of Takeoffs** — editable grid; date columns auto-calculate from the
-    trench date (business-day `WORKDAY` offsets) and are overridable per cell
+    trench date (business-day `WORKDAY` offsets) and are overridable per cell.
+    The ⓘ at the end of each row shows when it was added and by whom
+    (`flow_rows.created_at` / `created_by`, stamped by the database on insert —
+    no import path sets them, so Blueprint's intake, this app's import and
+    "+ Add row" are all covered. Older rows were backfilled from the change log;
+    see `add_created_at.sql`.)
+    The grid behaves like Excel: type to replace, F2/double-click to edit,
+    arrows commit in type mode, Ctrl+D/R, corner-handle fill in any direction
+    (dragging past the edge scrolls), paste that fills the selection, Ctrl+Z.
+    Dates are typed as text (9/24/26, 9/24, 092426, today, +7) with a calendar on
+    Alt+↓; an unreadable date is refused, never saved or used to blank a cell.
+    Edits show immediately and save in the background; a cell someone else
+    changed meanwhile is put back and reported. `node test-unit.js` covers the
+    date engine and import payload.
   - **Pending Budgets** — mirrors the Flow rows; editors add per-person checkbox
     columns and bind each to a user email; that purchasing user ticks their column
   - **Takeoff Changes** — change-request log purchasing users can add lines to

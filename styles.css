@@ -255,7 +255,7 @@ td input.cellinput,td select.cellinput{width:100%;min-width:0;box-sizing:border-
 
 /* ---------- print ---------- */
 @media print{
-  header.topbar,.tabs,.toolbar,#adminLink,#dashLink,#logoutBtn,#printBtn,#exportBtn,.gs-wrap,.delrow,.colhead-tools{display:none!important}
+  header.topbar,.tabs,.toolbar,#adminLink,#dashLink,#logoutBtn,#printBtn,#exportBtn,.gs-wrap,.delrow,.colhead-tools,.rowinfo,.rowinfo-h{display:none!important}
   #auth{display:none!important}
   body{background:#fff}
   main{max-width:100%;padding:0}
@@ -517,3 +517,22 @@ table.grid tbody td.handle-td{ overflow:visible!important; position:relative; }
 .chip-tip-evr.ok{color:var(--good);font-weight:600}
 .chip-tip-evr.pend{color:var(--muted)}
 [data-theme="dark"] .chip-tip-h{color:#dce6f5}
+
+/* ---------- Flow of Takeoffs: "Added on" info icon at the end of each row ---------- */
+table.grid thead th.rowinfo-h{width:28px;min-width:28px;padding:0}
+table.grid tbody td.rowinfo{width:28px;min-width:28px;text-align:center;padding:0!important;color:var(--muted)}
+.rowinfo-i{display:inline-block;cursor:help;font-size:14px;line-height:22px;opacity:.55;border-radius:50%;padding:0 3px;outline:none}
+.rowinfo-i:hover,.rowinfo-i:focus-visible{opacity:1;color:var(--blue)}
+.rowinfo-i:focus-visible{box-shadow:0 0 0 2px var(--blue)}
+
+/* ---------- cell editor: text date entry + calendar button ---------- */
+table.grid tbody td .cell.editing{position:relative;padding:0!important}
+td input.cellinput.datein{padding-right:18px}
+td input.cellinput.bad{outline-color:var(--bad);background:#fdecec}
+[data-theme="dark"] td input.cellinput.bad{background:#3a1c1c}
+.datepick-btn{position:absolute;right:1px;top:50%;transform:translateY(-50%);width:16px;height:18px;padding:0;border:none;
+  background:transparent;color:var(--muted);font-size:11px;line-height:18px;cursor:pointer;border-radius:3px;z-index:2}
+.datepick-btn:hover{background:var(--blue-050);color:var(--blue)}
+.datepick-hidden{position:absolute;right:0;bottom:0;width:1px;height:1px;opacity:0;border:0;padding:0;pointer-events:none}
+/* brief flash on the copied range */
+table.grid tbody td .cell.copy-flash{box-shadow:inset 0 0 0 2px var(--blue);transition:box-shadow .35s ease-out}

@@ -94,7 +94,7 @@ function workday(startIso, n, calendar){
    With this memo plus the workday change above, 39 ms and 9,546 calls.
 
    The cache is keyed by row id + field and MUST be cleared whenever a row changes —
-   clearEffCache() is called from loadDivision, saveFlowCell, applyBulk and onRemote.
+   clearEffCache() is called from loadDivision, saveFlowCell, runEdits and onRemote.
    A row with no id (never persisted) is not cached. */
 let _effCache=new Map();
 function clearEffCache(){ _effCache.clear(); }
@@ -680,11 +680,22 @@ function renderFlow(tb,area){
     + `<button class="btn mini ghost" data-clearfilters>Clear filters</button>`
     + `<button class="btn mini ghost" data-export>&#8681; Export CSV</button>`
     + `<span class="grow"></span>`
-    + `<span class="section-note" style="margin:0">Works like Excel: click to select, drag or Shift-click for a range; double-click, Enter, or just type to edit; Ctrl+D fill down, Ctrl+R fill right, Ctrl+C/Ctrl+V copy/paste, Delete to clear, or drag the corner handle. Blue columns auto-calculate.</span>`;
-  let h=`<div class="grid-wrap"><table class="grid"><thead>${theadHTML(cols,canEd)}</thead><tbody>`;
-  if(!rows.length) h+=`<tr><td colspan="${FLOW_COLS.length+(canEd?1:0)}"><div class="empty">No rows yet. ${canEd?"Add a row or import the Start Schedule.":""}</div></td></tr>`;
-  rows.forEach(r=>{
-    h+=`<tr>`;
+    + `<span class="section-note" style="margin:0">Works like Excel: click or drag to select; type, double-click or Enter to edit; Ctrl+C / Ctrl+V copy and paste (one value fills the selection); Ctrl+D / Ctrl+R fill; drag the corner handle; Delete clears; Ctrl+Z undoes. Dates: type 9/24/26, 9/24, 092426 or today — Alt+↓ for a calendar. Blue columns auto-calculate.</span>`;
+  let h=`<div class="grid-wrap"><table class="grid"><thead>${theadHTML(cols,canEd,true)}</thead><tbody>`;
+  if(!rows.length) h+=`<tr><td colspan="${FLOW_COLS.length+(canEd?1:0)+1}"><div class="empty">No rows yet. ${canEd?"Add a row or import the Start Schedule.":""}</div></td></tr>`;
+  rows.forEach(r=>{ h+=`<tr>${flowRowCells(r,canEd)}</tr>`; });
+  h+=`</tbody></table></div>`;
+  area.innerHTML=h;
+  bindGrid(area, saveFlowCell);
+  attachRowInfoTips(area);
+  bindHeader(area, cols, flowRows());
+  flowAfterRender(area, canEd);
+}
+/* One row's cells. Split out of renderFlow so an edit can repaint just the row it
+   touched (patchFlowRows) instead of rebuilding the whole grid — ~71,000 nodes for
+   Tampa, which is what made typing down a column stutter. */
+function flowRowCells(r, canEd){
+    let h="";
     if(canEd) h+=`<td class="rowhandle"><button class="delrow" data-del="${r.id}" title="Delete row">×</button></td>`;
     FLOW_COLS.forEach(c=>{
       if(c.readonly){   // auto, system-maintained (e.g. First Trench = earliest from import); shown but not editable
@@ -702,14 +713,35 @@ function renderFlow(tb,area){
         h+=cellHTML(r.id,c,disp,raw,canEd);
       }
     });
-    h+=`</tr>`;
-  });
-  h+=`</tbody></table></div>`;
-  area.innerHTML=h;
-  bindGrid(area, saveFlowCell);
-  bindHeader(area, cols, flowRows());
+    h+=`<td class="rowinfo"><span class="rowinfo-i" data-info="${r.id}" tabindex="0" role="button" aria-label="When this row was added">&#9432;</span></td>`;
+    return h;
+}
+/* Repaint rows in place after an edit. Like Excel, an edited row stays where it
+   is until the view is re-sorted or re-filtered, rather than jumping away mid-typing.
+   Falls back to a full render when a row isn't on screen or there are many. */
+function patchFlowRows(ids){
+  if(state.view!=="flow") return render();
+  const area=$("viewArea"); const list=[...new Set(ids)];
+  if(!area || list.length>150) return render();
+  const canEd=canEditDiv(state.divKey);
+  const m=shMatrix(area), byRow=new Map(state.flow.map(x=>[x.id,x]));
+  for(const id of list){
+    const r=byRow.get(id);
+    const i=m.byId.get(id), tr=i!=null ? m.rows[i] : null;
+    if(!r || !tr || !tr.isConnected) return render();
+    tr.innerHTML=flowRowCells(r,canEd);
+    // Same <tr>, new cells: refresh just that row of the cached cell matrix. A full
+    // rebuild walks every cell in the grid, which cost more than the repaint itself.
+    if(_shCache && _shCache.rowIdx && _shCache.rowIdx.has(tr)) _shCache.cells[_shCache.rowIdx.get(tr)]=[...tr.querySelectorAll(".cell")];
+    else shInvalidate();
+  }
+  paintSelection();
+}
+function flowAfterRender(area, canEd){
   if(canEd){
-    $("addFlow").onclick=async()=>{ const r={ id:uid(), division:state.divKey, sort_order:(state.flow.at(-1)?.sort_order||0)+1 }; state.flow.push(r); await saveRow("flow_rows",r);
+    $("addFlow").onclick=async()=>{ const r={ id:uid(), division:state.divKey, sort_order:(state.flow.at(-1)?.sort_order||0)+1 }; state.flow.push(r);
+      justAdded.set(r.id, new Date().toISOString());   // the database stamps created_at; this covers the display until the next load
+      await saveRow("flow_rows",r);
       pushUndo({ label:"add row", undo:async()=>{ state.flow=state.flow.filter(x=>x.id!==r.id); await deleteRow("flow_rows",r.id); } }); render(); };
     $("importBtn").onclick=showAdmin;
     $("undoFlowBtn").onclick=doUndo; updateUndoBtn();
@@ -749,10 +781,15 @@ async function saveFlowCell(id, field, type, value){
      clicking away (startEdit commits on blur) rebuilt the entire grid — ~71,000
      DOM nodes for Tampa. Nothing changed, so there is nothing to re-render. */
   if(sameVal(oldVal,newVal)) return;
+  /* Optimistic: show the value and move on NOW, save in the background. This used
+     to await the round trip before repainting, so Enter-then-type landed keystrokes
+     in the old cell or nowhere, and every edit felt like it hung for a beat. A
+     conflict or failure puts the latest value back and says so. */
   r[field]=newVal;
   clearEffCache();                 // this row's calculated dates are now stale
+  patchFlowRows([id]);
   const res = await saveField("flow_rows", id, field, newVal, oldVal);
-  if(res && res.ok===false && "current" in res) r[field]=res.current; // conflict: show latest, don't record undo
+  if(res && res.ok===false && "current" in res){ r[field]=res.current; clearEffCache(); deferRepaint([id]); return; } // conflict: show latest, don't record undo
   /* Undo goes through saveField, not savePatch. savePatch is an unguarded write:
      undoing an edit that a colleague has since corrected would silently destroy
      their correction and report success. saveField's compare-and-set detects that
@@ -766,8 +803,12 @@ async function saveFlowCell(id, field, type, value){
     } else if(rr) rr[field]=oldVal;
     clearEffCache();
   } });
-  clearEffCache();
-  render(); // recompute dependent calc columns
+}
+/* Repaint after a background save came back different — but never while the
+   user has an editor open, which a repaint would destroy. */
+function deferRepaint(ids){
+  const go=()=>{ if(isEditingOpen()){ setTimeout(go,300); return; } if(ids&&state.view==="flow") patchFlowRows(ids); else render(); };
+  go();
 }
 
 /* ===================================================================
@@ -966,7 +1007,7 @@ function renderChanges(tb,area){
      Ctrl+D, Ctrl+R, fill handle, paste) as long as bindGrid has covered "changes",
      but undo was recorded only for the Flow view and this button was only rendered
      there — so bulk edits here were irreversible with nothing on screen to press.
-     applyBulk records undo for both views now. */
+     runEdits records undo for both views now. */
   tb.innerHTML=`<span class="count">${pending} pending change requests</span>`
     + (canAdd?`<button class="btn mini" id="addChg">+ Add change request</button>`:"")
     + (canAdd?`<button class="btn mini ghost" id="undoFlowBtn" title="Nothing to undo">&#8630; Undo</button>`:"")
@@ -1012,10 +1053,17 @@ async function saveChgCell(id,field,type,value){
   const r=state.changes.find(x=>x.id===id); if(!r)return;
   const oldVal = r[field]===undefined?null:r[field];
   const newVal = value===""?null:value;
+  if(sameVal(oldVal,newVal)) return;
   r[field]=newVal;
+  render();                        // optimistic, as saveFlowCell
   const res = await saveField("takeoff_changes", id, field, newVal, oldVal);
-  if(res && res.ok===false && "current" in res) r[field]=res.current;
-  render();
+  if(res && res.ok===false && "current" in res){ r[field]=res.current; deferRepaint(null); return; }
+  pushUndo({ label:`edit ${field.replace(/_/g," ")}`, undo:async()=>{
+    const rr=state.changes.find(x=>x.id===id);
+    const res2=await saveField("takeoff_changes",id,field,oldVal,newVal);
+    if(res2 && res2.ok===false && "current" in res2){ if(rr) rr[field]=res2.current; toast("Not undone — someone else changed that cell since.","err"); }
+    else if(rr) rr[field]=oldVal;
+  } });
 }
 
 /* ===================================================================
@@ -1133,6 +1181,53 @@ function planTipHTML(entry, plan, planNm, commName){
    index in memory. That is the "it gets slower the longer I leave it open"
    symptom. Wire once; keep the current index on the container so the single
    handler always reads fresh data. */
+/* ---- "Added on" — the ⓘ at the end of each Flow of Takeoffs row ----
+   created_at / created_by are stamped by the database on insert and were
+   backfilled from the change log for older rows (add_created_at.sql). A row
+   added in this session has no created_at locally until the next load, so
+   justAdded remembers when we added it rather than showing "not recorded".
+   The app never writes these columns itself: every insert path leaves them to
+   the database default, which is what keeps Blueprint's import, this app's
+   import and "+ Add row" all stamped the same way. */
+const justAdded=new Map();          // row id -> ISO time added in this session
+function fmtStamp(ts){
+  const d=new Date(ts); if(isNaN(d)) return "";
+  return d.toLocaleDateString(undefined,{month:"short",day:"numeric",year:"numeric"})
+       + " at " + d.toLocaleTimeString(undefined,{hour:"numeric",minute:"2-digit"});
+}
+function rowInfoHTML(r){
+  const ts=r.created_at || justAdded.get(r.id) || null;
+  const by=r.created_by || (justAdded.has(r.id) ? state.email : "");
+  const when = ts ? esc(fmtStamp(ts)) : `<span class="muted">not recorded</span>`;
+  return `<div class="chip-tip-h">Added on: ${when}</div>`
+    + (by?`<div class="chip-tip-c">by ${esc(by)}</div>`:"")
+    + (r.updated_at && ts && Math.abs(new Date(r.updated_at)-new Date(ts))>60000
+        ? `<div class="chip-tip-c">Last changed ${esc(fmtStamp(r.updated_at))}${r.updated_by?` by ${esc(r.updated_by)}`:""}</div>` : "");
+}
+/* Same floating tip element as the Plans tab chips, wired once per container
+   with delegation — the grid is rebuilt on every render, the container is not. */
+function attachRowInfoTips(container){
+  let tip=$("chipTip");
+  if(!tip){ tip=document.createElement("div"); tip.id="chipTip"; tip.className="chip-tip hidden"; document.body.appendChild(tip);
+    window.addEventListener("scroll",()=>tip.classList.add("hidden"),{passive:true}); }
+  if(container.dataset.rowInfoWired) return;
+  container.dataset.rowInfoWired="1";
+  const show=el=>{
+    const r=state.flow.find(x=>x.id===el.dataset.info); if(!r) return;
+    tip.innerHTML=rowInfoHTML(r); tip.classList.remove("hidden");
+    const b=el.getBoundingClientRect(), tw=tip.offsetWidth, th=tip.offsetHeight;
+    // the icon sits at the far right, so open to its left
+    let x=b.right-tw; x=Math.max(8,Math.min(x,window.innerWidth-tw-8));
+    let y=b.top-th-8; if(y<8) y=b.bottom+8;
+    tip.style.left=x+"px"; tip.style.top=y+"px";
+  };
+  const hide=()=>tip.classList.add("hidden");
+  container.addEventListener("mouseover",e=>{ const el=e.target.closest(".rowinfo-i"); if(el) show(el); });
+  container.addEventListener("mouseout",e=>{ if(e.target.closest(".rowinfo-i")) hide(); });
+  container.addEventListener("focusin",e=>{ const el=e.target.closest(".rowinfo-i"); if(el) show(el); });
+  container.addEventListener("focusout",e=>{ if(e.target.closest(".rowinfo-i")) hide(); });
+  container.addEventListener("scroll",hide,{passive:true,capture:true});
+}
 function attachChipTips(container, idx){
   container._psIdx = idx;
   let tip=$("chipTip");
@@ -1600,7 +1695,7 @@ function filterCellHTML(col){
   const active = colFilterMap()[col.f] instanceof Set;
   return `<th><div class="msel colmsel${active?" active":""}" data-col="${col.f}"><button type="button" class="msel-btn" data-mbtn>${esc(mselLabel(col))}</button><div class="msel-panel hidden" data-mpanel></div></div></th>`;
 }
-function theadHTML(cols, hasHandle){
+function theadHTML(cols, hasHandle, hasInfo){
   const s=getSort();
   let h="<tr>"; if(hasHandle) h+="<th></th>";
   cols.forEach(c=>{
@@ -1608,8 +1703,10 @@ function theadHTML(cols, hasHandle){
     const sortable=c.sortable!==false;
     h+=`<th class="${c.cls||""} ${c.cellClass||""} ${sortable?"sorth":""}" ${sortable?`data-sort="${c.f}"`:""}>${esc(c.h)}${(c.calc||c.auto)?'<span class="calc-badge">auto</span>':""}<span class="sort-ind">${ind}</span></th>`;
   });
+  if(hasInfo) h+=`<th class="rowinfo-h" title="Hover the ⓘ on a row to see when it was added"></th>`;
   h+="</tr><tr class=\"filterrow\">"; if(hasHandle) h+="<th></th>";
   cols.forEach(c=>h+=filterCellHTML(c));
+  if(hasInfo) h+="<th></th>";
   return h+"</tr>";
 }
 /* ---- multi-select filter dropdown (msel), lazily built on open ---- */
@@ -1828,40 +1925,176 @@ function openTextModal(cell, commit){
   if(editable){ const ta=ov.querySelector("#txtArea"); ta.focus();
     ov.querySelector("#txtSave").onclick=async()=>{ await commit(id, field, "text", ta.value); close(); }; }
 }
+/* ---------------- dates typed by people ----------------
+   The date editor used to be the browser's <input type="date">. In a 70-px grid
+   column that control can't show mm/dd/yyyy plus its calendar button, it ignores
+   "9/24/26", it swallowed the keystroke that opened it, and its year segment
+   accepts "26" as the year 0026 — which it then saved. Cells are now plain text
+   boxes that read what people actually type:
+
+     9/24/26  9/24/2026  9-24-26  9.24.26   month/day/year
+     9/24                                   this year
+     092426  09242026                       no separators
+     2026-09-24                             ISO, as pasted from exports
+     Sep 24 2026, September 24, 2026        written out
+     t / today, +7, -3                      relative to today
+     46289                                  an Excel date serial
+
+   Anything else is refused with a message — never saved, and never blanks the
+   cell (normVal used to turn an unreadable paste into "", which CLEARED it).
+   Two-digit years are 20xx; years outside 1990–2100 are refused as typos. */
+function parseDateInput(v){
+  v=String(v==null?"":v).trim();
+  if(!v) return { ok:true, iso:null };
+  const today=parseIso(todayIso());
+  const mk=(y,m,d)=>{
+    if(y<100) y+=2000;
+    const dt=new Date(Date.UTC(y,m-1,d));
+    if(dt.getUTCFullYear()!==y || dt.getUTCMonth()!==m-1 || dt.getUTCDate()!==d) return null;
+    if(y<1990 || y>2100) return null;
+    return iso(dt);
+  };
+  let m, out=null;
+  if(/^(t|today|now)$/i.test(v)) out=todayIso();
+  else if((m=v.match(/^([+-])\s*(\d{1,4})$/))){ const d=new Date(today); d.setUTCDate(d.getUTCDate()+(m[1]==="-"?-1:1)*(+m[2])); out=iso(d); }
+  else if((m=v.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:[T ].*)?$/))) out=mk(+m[1],+m[2],+m[3]);
+  else if((m=v.match(/^(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{2}|\d{4})$/))) out=mk(+m[3],+m[1],+m[2]);
+  else if((m=v.match(/^(\d{1,2})[\/.\-](\d{1,2})$/))) out=mk(today.getUTCFullYear(),+m[1],+m[2]);
+  else if((m=v.match(/^(\d{2})(\d{2})(\d{2}|\d{4})$/))) out=mk(+m[3],+m[1],+m[2]);
+  else if(/^\d{5}(\.\d+)?$/.test(v) && +v>32874 && +v<73051){      // Excel serial, 1990–2100
+    const d=new Date(Date.UTC(1899,11,30)); d.setUTCDate(d.getUTCDate()+Math.floor(+v)); out=iso(d);
+  }
+  else if(/[a-z]/i.test(v)){                                       // "Sep 24, 2026"
+    const d=new Date(v.replace(/(\d)(st|nd|rd|th)\b/gi,"$1"));
+    if(!isNaN(d.getTime())) out=mk(d.getFullYear(),d.getMonth()+1,d.getDate());   // local parts: no UTC day shift
+  }
+  return out ? { ok:true, iso:out } : { ok:false };
+}
+const DATE_HELP="Try 9/24/26, 9/24, 092426, or today.";
+
+/* ---------------- the cell editor ----------------
+   Behaves like Excel's two modes. Typing on a selected cell starts ENTER mode:
+   the keystroke becomes the value and the arrow keys commit and move. Double
+   click, F2 or Enter start EDIT mode on the existing value: arrows move the
+   caret, and on a date Up/Down step a day (Shift: a week). F2 switches an
+   enter-mode edit to edit mode, as in Excel.
+
+   Three bugs fixed here, all of which made the grid feel stuck:
+   · Leaving a cell unchanged used to leave the <input> sitting in it, because
+     the save was skipped and so was the repaint. Every other feature treats a
+     .cellinput in the page as "still editing", so arrows, typing, copy and paste
+     all went dead until something else happened to re-render.
+   · Enter on a calculated (auto) date without changing it wrote the displayed
+     value back as a MANUAL OVERRIDE, so the cell stopped following its trench
+     date and turned orange. An unchanged value is now not a change.
+   · The commit awaited the database before moving on; see saveFlowCell. */
 function startEdit(span, commit, after, prefill){
   const type=span.dataset.type, id=span.dataset.id, field=span.dataset.field;
-  const cur = type==="date" ? invFmt(span.querySelector(".val").textContent)
-            : (span.dataset.raw!==undefined ? span.dataset.raw : span.querySelector(".val").textContent);
-  span._editing=true;
+  const isDate = type==="date";
+  const shown  = span.querySelector(".val") ? span.querySelector(".val").textContent : "";
+  const cur    = isDate ? shown : (span.dataset.raw!==undefined ? span.dataset.raw : shown);
+  const curCmp = isDate ? (invFmt(cur)||"") : (cur||"");
+  let enterMode = prefill!=null;
+  const saved = span.innerHTML;
+  span._editing=true; span.classList.add("editing");
   const cellW=Math.round(span.getBoundingClientRect().width);   // lock editor to current cell width (no column expansion)
   const inp=document.createElement("input");
-  inp.className="cellinput"; inp.type = type==="date"?"date":(type==="num"?"number":"text");
-  inp.value = (prefill!=null && type!=="date") ? String(prefill) : (cur||"");
+  inp.className="cellinput"+(isDate?" datein":"");
+  inp.type = type==="num" ? "number" : "text";
+  inp.autocomplete="off"; inp.spellcheck=false;
+  if(isDate){ inp.placeholder="m/d/yy"; inp.title=DATE_HELP+"  Alt+↓ opens a calendar."; }
+  inp.value = enterMode ? String(prefill) : (cur||"");
   if(cellW>0) inp.style.width=cellW+"px";
-  span.innerHTML=""; span.appendChild(inp); inp.focus();
-  if(prefill==null){ if(inp.select) try{inp.select();}catch(e){} } else { try{ inp.setSelectionRange(inp.value.length,inp.value.length); }catch(e){} }
-  let done=false, dir=null;
-  const finish=async(save)=>{
-    if(done) return; done=true;
-    const val=inp.value;
-    if(save){ await commit(id, field, type, val); if(after) after(dir); }
-    else { render(); if(after) after(null); }
-  };
-  inp.addEventListener("blur", ()=>finish(true));
+  span.innerHTML=""; span.appendChild(inp);
+
+  // Calendar: a hidden native date input opened on demand, so the picker is
+  // still there for people who want it, without that control's typing problems.
+  let picker=null, pickerOpen=false, done=false, dir=null;
+  if(isDate && typeof HTMLInputElement!=="undefined" && "showPicker" in HTMLInputElement.prototype){
+    const btn=document.createElement("button");
+    btn.type="button"; btn.className="datepick-btn"; btn.tabIndex=-1; btn.title="Pick a date (Alt+↓)"; btn.innerHTML="&#9662;";
+    picker=document.createElement("input"); picker.type="date"; picker.className="datepick-hidden"; picker.tabIndex=-1;
+    span.appendChild(btn); span.appendChild(picker);
+    btn.addEventListener("mousedown",ev=>{ ev.preventDefault(); ev.stopPropagation(); openPicker(); });
+    picker.addEventListener("change",()=>{ pickerOpen=false; const p=parseDateInput(picker.value); if(p.ok&&p.iso){ inp.value=fmtDate(p.iso); finish(true); } });
+  }
+  function openPicker(){
+    if(!picker) return;
+    const p=parseDateInput(inp.value); picker.value=(p.ok&&p.iso)||"";
+    pickerOpen=true;
+    try{ picker.showPicker(); }catch(e){ pickerOpen=false; return; }
+    // The picker closes without an event when dismissed; the next interaction ends it.
+    const end=()=>{ document.removeEventListener("mousedown",end,true); document.removeEventListener("keydown",end,true);
+      setTimeout(()=>{ if(!pickerOpen||done) return; pickerOpen=false; if(document.activeElement!==inp) finish(true); },0); };
+    setTimeout(()=>{ document.addEventListener("mousedown",end,true); document.addEventListener("keydown",end,true); },0);
+  }
+
+  inp.focus();
+  if(!enterMode){ try{ inp.select(); }catch(e){} }
+  else { try{ inp.setSelectionRange(inp.value.length,inp.value.length); }catch(e){} }
+
+  const restore=()=>{ span._editing=false; span.classList.remove("editing"); if(span.isConnected) span.innerHTML=saved; };
+  async function finish(save){
+    if(done) return;
+    let val=inp.value;
+    if(save && isDate){
+      const p=parseDateInput(val);
+      if(!p.ok){
+        if(dir){                                  // Enter/Tab/arrow: stay put and say why
+          dir=null; inp.classList.add("bad");
+          toast(`“${val}” isn't a date — ${DATE_HELP}`,"err");
+          inp.focus(); try{ inp.select(); }catch(e){}
+          return;
+        }
+        toast(`“${val}” isn't a date, so it wasn't saved. ${DATE_HELP}`,"err");   // clicked away
+        save=false;
+      } else val=p.iso||"";
+    }
+    done=true;
+    const unchanged = sameVal(curCmp, val);
+    restore();
+    if(!save || unchanged){ if(after) after(save?dir:null); return; }
+    const pending=commit(id, field, type, val);   // repaints synchronously, saves in the background
+    if(after) after(dir);
+    try{ await pending; }catch(e){ console.error(e); }
+  }
+  inp.addEventListener("input",()=>inp.classList.remove("bad"));
+  inp.addEventListener("blur",()=>setTimeout(()=>{ if(done||pickerOpen) return; if(document.activeElement===inp) return; finish(true); },0));
   inp.addEventListener("keydown", ev=>{
-    if(ev.key==="Enter"){ ev.preventDefault(); dir=ev.shiftKey?"up":"down"; finish(true); }
-    else if(ev.key==="Tab"){ ev.preventDefault(); dir=ev.shiftKey?"left":"right"; finish(true); }
-    else if(ev.key==="Escape"){ dir=null; finish(false); }
+    const k=ev.key;
+    /* Keys the editor handles must stop here. They bubbled on to the document's
+       grid handler, which by then saw no editor (finish had already removed it)
+       and acted on them again — so Enter committed AND re-opened an editor on
+       the next cell, and an arrow committed AND moved a second time. */
+    if(k==="Enter"||k==="Tab"||k==="Escape"||k==="F2"||k==="F4"||k.startsWith("Arrow")) ev.stopPropagation();
+    if(k==="Enter"){ ev.preventDefault(); dir=ev.shiftKey?"up":"down"; finish(true); }
+    else if(k==="Tab"){ ev.preventDefault(); dir=ev.shiftKey?"left":"right"; finish(true); }
+    else if(k==="Escape"){ ev.preventDefault(); finish(false); }
+    else if(k==="F2"){ ev.preventDefault(); enterMode=false; }
+    else if(isDate && ((ev.altKey && k==="ArrowDown") || k==="F4")){ ev.preventDefault(); openPicker(); }
+    else if(enterMode && k.startsWith("Arrow") && !ev.altKey){
+      ev.preventDefault(); dir={ArrowUp:"up",ArrowDown:"down",ArrowLeft:"left",ArrowRight:"right"}[k]; finish(true);
+    }
+    else if(isDate && (k==="ArrowUp"||k==="ArrowDown")){
+      ev.preventDefault();
+      const p=parseDateInput(inp.value), base=(p.ok&&p.iso)||todayIso(), d=parseIso(base);
+      d.setUTCDate(d.getUTCDate()+(k==="ArrowUp"?1:-1)*(ev.shiftKey?7:1));
+      inp.value=fmtDate(iso(d)); inp.classList.remove("bad");
+    }
   });
 }
 
 /* ================= Excel-style sheet (Flow / Changes) =================
-   Single click selects a cell; click-drag or Shift-click selects a rectangle. Double
-   click, Enter, F2, or just typing edits the active cell (Enter/Tab commit and move).
-   Arrow keys move (Shift+arrow extends). Ctrl+C copies, Ctrl+V pastes a block, Ctrl+D
-   fills down, Ctrl+R fills right, Delete clears. Drag the corner handle to fill down/up.
+   Single click selects a cell; click-drag or Shift-click selects a rectangle
+   (dragging past the edge scrolls). Double click, Enter, F2, or just typing edits
+   the active cell. Arrows move (Shift extends, Ctrl jumps to the edge); Home/End,
+   PageUp/PageDown; Ctrl+A selects all. Ctrl+C copies, Ctrl+V pastes (a single
+   value or a smaller block fills the whole selection, as Excel does), Ctrl+D /
+   Ctrl+R fill down / right (from the cell above/left when one row/column is
+   selected), Delete clears, Backspace clears-and-edits, Ctrl+Z undoes. The
+   corner handle fills down, up, left or right.
    Every write goes through the field-level save, so conflict protection + RLS apply. */
-let sheet={ view:null, container:null, commit:null, anchor:null, focus:null, drag:false, fill:false, fillTo:null };
+let sheet={ view:null, container:null, commit:null, anchor:null, focus:null, drag:false, fill:false, fillTo:null, painted:[], pasteOk:{} };
 /* The cell matrix, cached per grid build.
 
    These four were each O(rows) per CALL, with no cache: one shRows() is a subtree
@@ -1872,14 +2105,18 @@ let sheet={ view:null, container:null, commit:null, anchor:null, focus:null, dra
    ~8 million row scans. Every render paid it too, via clampSel + paintSelection,
    even with a single cell selected.
 
-   shCache is invalidated by bindGrid after it writes innerHTML (the only place the
-   grid DOM is replaced), and defensively if the cached first row has been detached. */
+   Invalidated by bindGrid after it writes innerHTML and by patchFlowRows after
+   it rewrites a row, and defensively if a cached row or cell has been detached. */
 let _shCache=null;
 function shInvalidate(){ _shCache=null; }
 function shMatrix(c){
-  if(_shCache && _shCache.c===c && _shCache.rows.length && _shCache.rows[0].isConnected) return _shCache;
+  if(_shCache && _shCache.c===c && _shCache.rows.length && _shCache.rows[0].isConnected
+     && (!_shCache.cells[0] || !_shCache.cells[0][0] || _shCache.cells[0][0].isConnected)) return _shCache;
   const rows=[...c.querySelectorAll("table.grid tbody tr")].filter(tr=>tr.querySelector(".cell"));
-  _shCache={ c, rows, cells:rows.map(tr=>[...tr.querySelectorAll(".cell")]) };
+  const rowIdx=new Map(rows.map((tr,i)=>[tr,i]));
+  const cells=rows.map(tr=>[...tr.querySelectorAll(".cell")]);
+  const byId=new Map(); cells.forEach((cs,i)=>{ const id=cs[0]&&cs[0].dataset.id; if(id!=null) byId.set(id,i); });
+  _shCache={ c, rows, rowIdx, byId, cells };
   return _shCache;
 }
 function shRows(c){ return shMatrix(c).rows; }
@@ -1888,41 +2125,56 @@ function shCell(c,r,cc){ const m=shMatrix(c); return (m.cells[r] && m.cells[r][c
 function shCoord(cell){
   const m=shMatrix(sheet.container);
   const tr=cell.closest("tr");
-  const r=m.rows.indexOf(tr); if(r<0) return null;
+  const r=m.rowIdx.has(tr)?m.rowIdx.get(tr):-1; if(r<0) return null;
   const c=m.cells[r].indexOf(cell); if(c<0) return null;
   return {r,c};
 }
 function selRect(){ const a=sheet.anchor, f=sheet.focus||sheet.anchor; return { r1:Math.min(a.r,f.r), c1:Math.min(a.c,f.c), r2:Math.max(a.r,f.r), c2:Math.max(a.c,f.c) }; }
 function clampSel(){ const {R,C}=shDims(sheet.container); if(!sheet.anchor) return; if(R===0||C===0){ sheet.anchor=sheet.focus=null; return; }
   const cl=p=>{ p.r=Math.max(0,Math.min(p.r,R-1)); p.c=Math.max(0,Math.min(p.c,C-1)); }; cl(sheet.anchor); if(sheet.focus) cl(sheet.focus); }
-function normVal(type, v){ v=(v==null?"":String(v)).trim();
+/* A value headed for a cell. For dates, `undefined` means "unreadable" — the
+   caller skips it and says so, rather than writing a blank over what's there. */
+function normVal(type, v){
+  v=(v==null?"":String(v)).trim();
   if(type!=="date") return v;
-  if(/^\d{4}-\d{2}-\d{2}$/.test(v)) return v;
-  const inv=invFmt(v); if(inv) return inv;
-  const d=new Date(v); return isNaN(d.getTime())?"":d.toISOString().slice(0,10);
+  const p=parseDateInput(v);
+  return p.ok ? (p.iso||"") : undefined;
 }
 function cellSaveVal(cell){ const arr=sheet.view==="flow"?state.flow:state.changes; const r=arr.find(x=>x.id===cell.dataset.id); const v=r?r[cell.dataset.field]:null; return v==null?"":v; }
+/* Only the cells painted last time are un-painted, instead of querying the whole
+   grid for them on every mouse move of a drag. */
 function paintSelection(){
   const c=sheet.container; if(!c) return;
-  c.querySelectorAll(".cell.cell-active,.cell.cell-selected,.cell.fill-preview").forEach(x=>x.classList.remove("cell-active","cell-selected","fill-preview"));
-  c.querySelectorAll("td.handle-td").forEach(td=>td.classList.remove("handle-td"));
-  c.querySelectorAll(".fill-handle").forEach(x=>x.remove());
+  for(const el of sheet.painted) el.classList.remove("cell-active","cell-selected","fill-preview");
+  sheet.painted=[];
+  if(sheet.handle){ sheet.handle.remove(); if(sheet.handle._td) sheet.handle._td.classList.remove("handle-td"); sheet.handle=null; }
   if(!sheet.anchor) return;
-  const s=selRect();
-  for(let r=s.r1;r<=s.r2;r++) for(let cc=s.c1;cc<=s.c2;cc++){ const el=shCell(c,r,cc); if(el) el.classList.add("cell-selected"); }
-  const act=shCell(c,sheet.anchor.r,sheet.anchor.c); if(act) act.classList.add("cell-active");
-  if(sheet.fill && sheet.fillTo!=null){
-    const a=Math.min(sheet.fillTo,s.r1), b=Math.max(sheet.fillTo,s.r2);
-    for(let r=a;r<=b;r++){ if(r>=s.r1 && r<=s.r2) continue; for(let cc=s.c1;cc<=s.c2;cc++){ const el=shCell(c,r,cc); if(el) el.classList.add("fill-preview"); } }
-  }
-  const br=shCell(c,s.r2,s.c2); if(br){ const td=br.parentElement; td.classList.add("handle-td"); const h=document.createElement("div"); h.className="fill-handle"; td.appendChild(h); }
+  const s=selRect(), add=(el,cls)=>{ if(el){ el.classList.add(cls); sheet.painted.push(el); } };
+  for(let r=s.r1;r<=s.r2;r++) for(let cc=s.c1;cc<=s.c2;cc++) add(shCell(c,r,cc),"cell-selected");
+  add(shCell(c,sheet.anchor.r,sheet.anchor.c),"cell-active");
+  const fr=fillRect();
+  if(fr) for(let r=fr.r1;r<=fr.r2;r++) for(let cc=fr.c1;cc<=fr.c2;cc++){ if(r>=s.r1&&r<=s.r2&&cc>=s.c1&&cc<=s.c2) continue; add(shCell(c,r,cc),"fill-preview"); }
+  const br=shCell(c,s.r2,s.c2); if(br && !sheet.fill){ const td=br.parentElement; td.classList.add("handle-td"); const h=document.createElement("div"); h.className="fill-handle"; h.title="Drag to fill"; h._td=td; td.appendChild(h); sheet.handle=h; }
 }
-function moveActive(dir, extend){
+/* Where a fill-handle drag would write: the selection stretched along ONE axis —
+   whichever way the pointer has gone further past the selection's edge. */
+function fillRect(){
+  if(!sheet.fill || !sheet.fillTo || !sheet.anchor) return null;
+  const s=selRect(), t=sheet.fillTo;
+  const dr = t.r>s.r2 ? t.r-s.r2 : (t.r<s.r1 ? s.r1-t.r : 0);
+  const dc = t.c>s.c2 ? t.c-s.c2 : (t.c<s.c1 ? s.c1-t.c : 0);
+  if(!dr && !dc) return null;
+  if(dr>=dc) return { axis:"v", r1:Math.min(s.r1,t.r), r2:Math.max(s.r2,t.r), c1:s.c1, c2:s.c2 };
+  return { axis:"h", r1:s.r1, r2:s.r2, c1:Math.min(s.c1,t.c), c2:Math.max(s.c2,t.c) };
+}
+function moveActive(dir, extend, jump){
   const {R,C}=shDims(sheet.container); if(R===0||C===0) return;
   if(!sheet.anchor){ sheet.anchor={r:0,c:0}; sheet.focus={r:0,c:0}; paintSelection(); return; }
   const base=extend?(sheet.focus||{r:sheet.anchor.r,c:sheet.anchor.c}):sheet.anchor;
   let r=base.r, c=base.c;
-  if(dir==="down") r++; else if(dir==="up") r--; else if(dir==="right") c++; else if(dir==="left") c--;
+  if(jump){ if(dir==="down") r=R-1; else if(dir==="up") r=0; else if(dir==="right") c=C-1; else if(dir==="left") c=0; }
+  else if(dir==="down") r++; else if(dir==="up") r--; else if(dir==="right") c++; else if(dir==="left") c--;
+  else if(dir==="pgdn") r+=20; else if(dir==="pgup") r-=20;
   r=Math.max(0,Math.min(r,R-1)); c=Math.max(0,Math.min(c,C-1));
   if(extend){ sheet.focus={r,c}; } else { sheet.anchor={r,c}; sheet.focus={r,c}; }
   paintSelection();
@@ -1932,181 +2184,302 @@ function editActive(prefill){
   const cell=sheet.anchor?shCell(sheet.container,sheet.anchor.r,sheet.anchor.c):null; if(!cell) return;
   if(cell.matches(".longcell")){ openTextModal(cell, sheet.commit); return; }   // always open (read-only for viewers; editable if allowed)
   if(!cell.matches(".editable")) return;
+  sheet.focus={r:sheet.anchor.r,c:sheet.anchor.c};
   startEdit(cell, sheet.commit, dir=>{ if(dir) moveActive(dir,false); else paintSelection(); }, prefill);
 }
-/* `defer` suppresses the render so runEdits can render ONCE after every field,
-   instead of once per field — a 14-column paste used to rebuild the whole grid 14
-   times. The 500-cell cap is enforced by the caller now, across all fields. */
-async function applyBulk(view, field, type, edits, opts){
-  if(!edits.length) return 0;
+
+/* ---------------- bulk writes: paste, fill, clear ----------------
+   These used to save one cell at a time, one after another, and show nothing
+   until the last save came back — so a 100-cell fill sat looking broken for
+   several seconds, then everything jumped. Now:
+   · every value is applied and painted at once (optimistic);
+   · saves go out a few at a time in parallel, with a progress count for big ones;
+   · a cell that turns out to have changed under us is put back to the latest
+     value, and the count is reported;
+   · the whole operation is ONE undo step, not one per column.
+   The cap is per operation, across all columns. */
+const BULK_LIMIT=1000, BULK_PARALLEL=6;
+function collectEdits(cells){
+  const byField={}; let invalid=0; const bad=[];
+  cells.forEach(({el,value})=>{
+    if(!el||!el.matches(".editable,.editallowed")) return;
+    const field=el.dataset.field, type=el.dataset.type||"text";
+    const v=normVal(type,value);
+    if(v===undefined){ invalid++; if(bad.length<3) bad.push(String(value).trim()); return; }
+    (byField[field]=byField[field]||{type,list:[]}).list.push({id:el.dataset.id, value:v});
+  });
+  Object.defineProperty(byField,"_invalid",{value:{n:invalid,sample:bad},enumerable:false});
+  return byField;
+}
+async function poolRun(items, n, fn){
+  let i=0; const workers=Array.from({length:Math.min(n,items.length)},async()=>{ while(i<items.length){ const it=items[i++]; await fn(it); } });
+  await Promise.all(workers);
+}
+function repaintAfterEdit(ids){ if(sheet.view==="flow") patchFlowRows(ids); else render(); }
+function saveProgress(done,total){
+  const b=$("banner"); if(!b) return;
+  if(done>=total){ setBanner(); return; }
+  b.innerHTML=`<b>Saving ${done.toLocaleString()} of ${total.toLocaleString()} cells…</b>`; b.style.color="";
+}
+async function runEdits(byField, label){
+  const view=sheet.view;
   const table=view==="flow"?"flow_rows":"takeoff_changes";
   const arr=view==="flow"?state.flow:state.changes;
-  const byId=new Map(arr.map(r=>[r.id,r]));   // was arr.find() per edit: O(edits × rows)
-  let conflicts=0; const before=[];   // {id, prev} for successfully-changed cells (for undo)
-  for(const {id,value} of edits){
+  const byId=new Map(arr.map(r=>[r.id,r]));
+  const inv=byField._invalid||{n:0,sample:[]};
+  const ch=[];
+  for(const f of Object.keys(byField)) for(const {id,value} of byField[f].list){
     const r=byId.get(id); if(!r) continue;
-    const oldVal=r[field]===undefined?null:r[field];
-    const newVal=(value===""||value==null)?null:value;
+    const oldVal=r[f]===undefined?null:r[f], newVal=(value===""||value==null)?null:value;
     if(sameVal(oldVal,newVal)) continue;
-    r[field]=newVal;
-    const res=await saveField(table,id,field,newVal,oldVal);
-    if(res && res.ok===false && "current" in res){ r[field]=res.current; conflicts++; }
-    else before.push({id, prev:oldVal});
+    ch.push({ r, id, field:f, oldVal, newVal });
   }
-  /* Undo is recorded for BOTH views now. The Takeoff Changes tab has had the full
-     sheet model (Delete, Ctrl+D, Ctrl+R, fill, paste) since bindGrid covered it,
-     but undo was recorded only for `flow` and the Undo button was only rendered on
-     the Flow tab — so a Delete over a block of Takeoff Changes blanked up to 500
-     cells per column permanently with nothing to press.
+  const skippedMsg = inv.n ? `${inv.n} value(s) skipped — not a date: ${inv.sample.map(s=>`“${s}”`).join(", ")}${inv.n>inv.sample.length?"…":""}` : "";
+  if(!ch.length){ if(skippedMsg) toast(skippedMsg,"err"); return; }
+  if(ch.length>BULK_LIMIT){
+    toast(`That's ${ch.length.toLocaleString()} cells — over the ${BULK_LIMIT.toLocaleString()} limit for one action. Please work in a smaller range.`,"err");
+    return;
+  }
+  ch.forEach(c=>{ c.r[c.field]=c.newVal; });
+  clearEffCache();
+  repaintAfterEdit(ch.map(c=>c.id));
 
-     It also goes through saveField rather than savePatch, so undoing a cell a
-     colleague has since corrected is refused rather than silently overwriting
-     their value. */
-  if(before.length){
-    const undoArr=()=>view==="flow"?state.flow:state.changes;
-    pushUndo({ label:`${field.replace(/_/g," ")} × ${before.length}`, undo:async()=>{
-      const m=new Map(undoArr().map(r=>[r.id,r]));
+  let done=0, conflicts=0; const ok=[];
+  const big=ch.length>12;
+  if(big) saveProgress(0,ch.length);
+  await poolRun(ch, BULK_PARALLEL, async c=>{
+    const res=await saveField(table,c.id,c.field,c.newVal,c.oldVal);
+    if(res && res.ok===false && "current" in res){ c.r[c.field]=res.current; conflicts++; }
+    else ok.push(c);
+    done++; if(big && (done%10===0 || done===ch.length)) saveProgress(done,ch.length);
+  });
+  if(ok.length){
+    pushUndo({ label:`${label||"edit"} (${ok.length} cell${ok.length===1?"":"s"})`, undo:async()=>{
+      const rows=new Map((view==="flow"?state.flow:state.changes).map(r=>[r.id,r]));
       let refused=0;
-      for(const b of before){
-        const rr=m.get(b.id);
-        const cur=rr?(rr[field]===undefined?null:rr[field]):null;
-        const res=await saveField(table, b.id, field, b.prev, cur);
-        if(res && res.ok===false && "current" in res){ if(rr) rr[field]=res.current; refused++; }
-        else if(rr) rr[field]=b.prev;
-      }
+      await poolRun(ok, BULK_PARALLEL, async c=>{
+        const rr=rows.get(c.id); const cur=rr?(rr[c.field]===undefined?null:rr[c.field]):null;
+        const res=await saveField(table,c.id,c.field,c.oldVal,cur);
+        if(res && res.ok===false && "current" in res){ if(rr) rr[c.field]=res.current; refused++; }
+        else if(rr) rr[c.field]=c.oldVal;
+      });
       clearEffCache();
       if(refused) toast(refused+" cell(s) not undone — changed by someone else since.","err");
     }});
   }
-  clearEffCache();
-  if(!(opts&&opts.defer)) render();
-  if(conflicts) toast(conflicts+" cell(s) weren't saved — changed by someone else. Latest values shown.","err");
-  return conflicts;
-}
-function collectEdits(cells){ const byField={};
-  cells.forEach(({el,value})=>{ if(!el||!el.matches(".editable,.editallowed")) return; const field=el.dataset.field,type=el.dataset.type||"text";
-    (byField[field]=byField[field]||{type,list:[]}).list.push({id:el.dataset.id, value:normVal(type,value)}); });
-  return byField;
-}
-/* The 500-cell cap lives HERE, across every field, because it used to be inside
-   applyBulk — which runs once per column. A 14-column × 400-row paste was 5,600
-   cells that each passed a per-column check of 400, and then made 5,600 serial
-   round trips with no progress and no cancel. Renders once at the end, not per
-   field. */
-async function runEdits(byField){
-  const fields=Object.keys(byField);
-  const total=fields.reduce((n,f)=>n+byField[f].list.length,0);
-  if(!total) return;
-  if(total>500){
-    toast(`That's ${total.toLocaleString()} cells across ${fields.length} column(s) — over the 500 limit. Please work in a smaller range.`,"err");
-    return;
-  }
-  for(const f of fields) await applyBulk(sheet.view,f,byField[f].type,byField[f].list,{defer:true});
-  render();
+  if(conflicts){
+    clearEffCache(); deferRepaint(ch.map(c=>c.id));
+    toast(conflicts+" cell(s) weren't saved — changed by someone else. Latest values shown."+(skippedMsg?" "+skippedMsg:""),"err");
+  } else if(skippedMsg) toast(skippedMsg,"err");
 }
 /* Confirm a large clear. Delete over a block had no prompt at all, and on the
    Takeoff Changes tab it also had no undo — so a stray keypress blanked requestor,
    community, plan and request text across hundreds of rows permanently. Undo is
-   recorded for both views now (see applyBulk), but a destructive bulk action this
-   easy to trigger should still ask. */
+   recorded for both views now, but a destructive bulk action this easy to trigger
+   should still ask. */
 async function clearSelection(){ const s=selRect(), cells=[];
   for(let r=s.r1;r<=s.r2;r++) for(let cc=s.c1;cc<=s.c2;cc++){ const el=shCell(sheet.container,r,cc); if(el) cells.push({el,value:""}); }
   const editable=cells.filter(c=>c.el && (c.el.matches(".editable")||c.el.matches(".editallowed"))).length;
-  if(editable>20 && !confirm(`Clear ${editable} cell(s)?\n\nThis blanks them for everyone. You can undo it from the Undo button, but only in this browser session.`)) return;
-  await runEdits(collectEdits(cells)); }
-async function fillDir(dir){ const s=selRect(), cells=[];
-  if(dir==="down"){ if(s.r2<=s.r1) return; for(let cc=s.c1;cc<=s.c2;cc++){ const src=shCell(sheet.container,s.r1,cc); if(!src) continue; const v=cellSaveVal(src);
-      for(let r=s.r1+1;r<=s.r2;r++) cells.push({el:shCell(sheet.container,r,cc),value:v}); } }
-  else { if(s.c2<=s.c1) return; for(let r=s.r1;r<=s.r2;r++){ const src=shCell(sheet.container,r,s.c1); if(!src) continue; const v=cellSaveVal(src);
-      for(let cc=s.c1+1;cc<=s.c2;cc++) cells.push({el:shCell(sheet.container,r,cc),value:v}); } }
-  await runEdits(collectEdits(cells)); }
-async function doHandleFill(toRow){ if(toRow==null||!sheet.anchor) return; const s=selRect(), h=s.r2-s.r1+1, cells=[];
-  if(toRow>s.r2){ for(let cc=s.c1;cc<=s.c2;cc++) for(let r=s.r2+1;r<=toRow;r++){ const src=shCell(sheet.container,s.r1+((r-s.r1)%h),cc); cells.push({el:shCell(sheet.container,r,cc),value:cellSaveVal(src)}); } sheet.anchor={r:s.r1,c:s.c1}; sheet.focus={r:toRow,c:s.c2}; }
-  else if(toRow<s.r1){ for(let cc=s.c1;cc<=s.c2;cc++) for(let r=toRow;r<s.r1;r++){ const src=shCell(sheet.container,s.r1+(((r-toRow)%h)),cc); cells.push({el:shCell(sheet.container,r,cc),value:cellSaveVal(src)}); } sheet.anchor={r:toRow,c:s.c1}; sheet.focus={r:s.r2,c:s.c2}; }
-  await runEdits(collectEdits(cells)); }
+  if(editable>20 && !confirm(`Clear ${editable} cell(s)?\n\nThis blanks them for everyone. You can undo it with Ctrl+Z or the Undo button, but only in this browser session.`)) return;
+  await runEdits(collectEdits(cells),"clear"); }
+/* Ctrl+D / Ctrl+R. With a block selected, the first row (column) is copied down
+   (right). With a single row (column) selected, the value comes from the cell
+   above (to the left) — Excel's behaviour, and the one people reach for when
+   filling one cell from its neighbour. */
+async function fillDir(dir){ const c=sheet.container, s=selRect(), cells=[];
+  if(dir==="down"){
+    const src = s.r2>s.r1 ? s.r1 : s.r1-1, from = s.r2>s.r1 ? s.r1+1 : s.r1;
+    if(src<0) return;
+    for(let cc=s.c1;cc<=s.c2;cc++){ const se=shCell(c,src,cc); if(!se) continue; const v=cellSaveVal(se);
+      for(let r=from;r<=s.r2;r++) cells.push({el:shCell(c,r,cc),value:v}); }
+  } else {
+    const src = s.c2>s.c1 ? s.c1 : s.c1-1, from = s.c2>s.c1 ? s.c1+1 : s.c1;
+    if(src<0) return;
+    for(let r=s.r1;r<=s.r2;r++){ const se=shCell(c,r,src); if(!se) continue; const v=cellSaveVal(se);
+      for(let cc=from;cc<=s.c2;cc++) cells.push({el:shCell(c,r,cc),value:v}); }
+  }
+  await runEdits(collectEdits(cells), dir==="down"?"fill down":"fill right"); }
+/* Fill handle: repeat the selected block along whichever axis it was dragged. */
+async function doHandleFill(fr){ if(!fr||!sheet.anchor) return; const c=sheet.container, s=selRect(), cells=[];
+  const h=s.r2-s.r1+1, w=s.c2-s.c1+1, mod=(a,b)=>((a%b)+b)%b;
+  for(let r=fr.r1;r<=fr.r2;r++) for(let cc=fr.c1;cc<=fr.c2;cc++){
+    if(r>=s.r1&&r<=s.r2&&cc>=s.c1&&cc<=s.c2) continue;
+    const src=shCell(c, s.r1+mod(r-s.r1,h), s.c1+mod(cc-s.c1,w)); if(!src) continue;
+    cells.push({el:shCell(c,r,cc),value:cellSaveVal(src)});
+  }
+  sheet.anchor={r:fr.r1,c:fr.c1}; sheet.focus={r:fr.r2,c:fr.c2};
+  await runEdits(collectEdits(cells),"fill"); }
+
+/* ---------------- copy / paste ----------------
+   Tab-separated text, quoted the way Excel quotes it, so a notes cell with a
+   line break or a tab survives a round trip in either direction. */
+function tsvField(v){ v=String(v==null?"":v); return /[\t\n\r"]/.test(v) ? '"'+v.replace(/"/g,'""')+'"' : v; }
 function selTSV(){ const s=selRect(), lines=[];
-  for(let r=s.r1;r<=s.r2;r++){ const parts=[]; for(let cc=s.c1;cc<=s.c2;cc++){ const el=shCell(sheet.container,r,cc); parts.push(el?(el.querySelector(".val")?.textContent||""):""); } lines.push(parts.join("\t")); }
-  return lines.join("\n"); }
+  for(let r=s.r1;r<=s.r2;r++){ const parts=[]; for(let cc=s.c1;cc<=s.c2;cc++){ const el=shCell(sheet.container,r,cc); parts.push(tsvField(el?(el.querySelector(".val")?.textContent||""):"")); } lines.push(parts.join("\t")); }
+  return lines.join("\r\n"); }
+function parseTSV(t){
+  t=String(t).replace(/\r\n?/g,"\n");
+  const rows=[]; let row=[], f="", q=false;
+  for(let i=0;i<t.length;i++){ const ch=t[i];
+    if(q){ if(ch==='"'){ if(t[i+1]==='"'){ f+='"'; i++; } else q=false; } else f+=ch; }
+    else if(ch==='"' && f===""){ q=true; }
+    else if(ch==="\t"){ row.push(f); f=""; }
+    else if(ch==="\n"){ row.push(f); rows.push(row); row=[]; f=""; }
+    else f+=ch;
+  }
+  if(f!=="" || row.length){ row.push(f); rows.push(row); }
+  return rows;
+}
+function flashCopied(){
+  const c=sheet.container, s=selRect(), els=[];
+  for(let r=s.r1;r<=s.r2;r++) for(let cc=s.c1;cc<=s.c2;cc++){ const el=shCell(c,r,cc); if(el){ el.classList.add("copy-flash"); els.push(el); } }
+  setTimeout(()=>els.forEach(el=>el.classList.remove("copy-flash")),450);
+}
 /* Paste is positional — it addresses rows by their on-screen position, because
    shRows reads the rendered tbody, which renderFlow built from
-   sortView(passFilters(...)). There is no row-identity check, and there cannot
-   really be one in a spreadsheet UI: pasting a block into the visible grid is what
-   the gesture means.
+   sortView(passFilters(...)). Pasting into a REORDERED view with a clipboard in
+   a different order would land values on the wrong rows, silently recomputing
+   six derived dates each.
 
-   What makes it dangerous is doing it into a REORDERED view. Sort by Community,
-   paste a column of dates copied from an export in a different order, and the
-   dates land on the wrong plans — silently recomputing six derived dates each.
-   applyBulk writes every cell whose value differs, so most of them do change, and
-   it reports only conflicts, never "these went somewhere you didn't expect".
+   So a paste that spans several rows asks first when a sort or filter is active
+   — but once per view and sort/filter setting per session, not on every paste
+   (sorts are remembered between visits, so it used to ask every single time).
+   A one-row paste can't land on the wrong row and never asks.
 
-   So: confirm when a sort or a filter is active, and say which. Also report
-   clipped cells instead of discarding them silently. */
+   It starts at the top-left of the selection, not wherever the selection began,
+   and a single value or a block that divides the selection evenly fills the
+   whole selection — both as Excel does. */
 async function doPaste(txt){ const c=sheet.container; if(!sheet.anchor) return;
-  const matrix=txt.replace(/\r\n?/g,"\n").split("\n"); if(matrix.length && matrix[matrix.length-1]==="") matrix.pop();
-  const {R,C}=shDims(c), sr=sheet.anchor.r, sc=sheet.anchor.c, cells=[];
-  let clipped=0;
-  matrix.forEach((line,ri)=>line.split("\t").forEach((val,ci)=>{ const r=sr+ri, cc=sc+ci;
-    if(r>=R||cc>=C){ clipped++; return; } cells.push({el:shCell(c,r,cc),value:val}); }));
-  if(!cells.length){ toast("Nothing pasted — the selection start is outside the grid.","err"); return; }
-  const s=getSort(), reordered=!!s, filtered=anyFilters();
-  if(reordered || filtered){
-    const why=[reordered?"sorted":"", filtered?"filtered":""].filter(Boolean).join(" and ");
-    if(!confirm(`This view is ${why}, so the rows are not in their underlying order.\n\n`
-      + `Pasting ${cells.length} cell(s) writes them to the rows in the order shown on screen — `
-      + `if your clipboard is in a different order, values will land on the wrong rows.\n\n`
-      + `Paste anyway?`)) return;
+  const block=parseTSV(txt); if(!block.length) return;
+  const bh=block.length, bw=Math.max(...block.map(r=>r.length));
+  const {R,C}=shDims(c), s=selRect(), sh=s.r2-s.r1+1, sw=s.c2-s.c1+1;
+  const tile = (sh>1||sw>1) && (sh>=bh && sw>=bw) && sh%bh===0 && sw%bw===0;
+  const H = tile ? sh : bh, W = tile ? sw : bw;
+  const cells=[]; let clipped=0;
+  for(let ri=0; ri<H; ri++) for(let ci=0; ci<W; ci++){
+    const src=block[ri%bh];
+    if(!tile && ci>=src.length) continue;                // a short line doesn't blank the cells after it
+    const val=src[ci%bw]!==undefined ? src[ci%bw] : "";
+    const r=s.r1+ri, cc=s.c1+ci;
+    if(r>=R||cc>=C){ clipped++; continue; }
+    cells.push({el:shCell(c,r,cc),value:val});
   }
-  const pr=matrix.length-1, pc=Math.max(...matrix.map(l=>l.split("\t").length))-1;
-  sheet.anchor={r:sr,c:sc}; sheet.focus={r:Math.min(R-1,sr+pr),c:Math.min(C-1,sc+pc)};
-  await runEdits(collectEdits(cells));
+  if(!cells.length){ toast("Nothing pasted — the selection start is outside the grid.","err"); return; }
+  const sort=getSort(), reordered=!!sort, filtered=anyFilters();
+  if((reordered || filtered) && Math.min(H,R-s.r1)>1){
+    const sig=state.view+"|"+JSON.stringify(sort||null)+"|"+JSON.stringify(colFilterSig())+"|"+(state.filter||"");
+    if(!sheet.pasteOk[sig]){
+      const why=[reordered?"sorted":"", filtered?"filtered":""].filter(Boolean).join(" and ");
+      if(!confirm(`This view is ${why}, so the rows are not in their underlying order.\n\n`
+        + `Pasting writes to the rows in the order shown on screen — if your clipboard is in a `
+        + `different order, values will land on the wrong rows.\n\nPaste anyway? (You won't be asked again for this view until the sort or filters change.)`)) return;
+      sheet.pasteOk[sig]=true;
+    }
+  }
+  sheet.anchor={r:s.r1,c:s.c1}; sheet.focus={r:Math.min(R-1,s.r1+H-1),c:Math.min(C-1,s.c1+W-1)};
+  await runEdits(collectEdits(cells),"paste");
   if(clipped) toast(`${clipped} pasted cell(s) fell outside the grid and were not written.`,"err"); }
-/* The container (#viewArea) outlives every render — only its innerHTML is replaced — so these
-   listeners are wired ONCE and delegate off the live `sheet` model (container/commit/anchor are
-   refreshed by bindGrid on each render). Re-attaching per render stacked a duplicate set every
-   time. The view guard keeps them inert on the tabs that don't use the sheet model. */
+function colFilterSig(){ const m=colFilterMap(), o={}; Object.keys(m).forEach(k=>{ if(m[k] instanceof Set && m[k].size) o[k]=[...m[k]].sort(); }); return o; }
+
+/* ---------------- mouse ----------------
+   The container (#viewArea) outlives every render — only its innerHTML is
+   replaced — so these listeners are wired ONCE and delegate off the live `sheet`
+   model. The view guard keeps them inert on the tabs that don't use it.
+
+   Clicking another cell while editing now commits the edit, as Excel does. The
+   mousedown handler calls preventDefault (to stop text selection), which also
+   stopped the editor from ever losing focus: the selection moved, but typing
+   carried on into the old cell. Clicks inside the editor itself are left alone,
+   so the caret can be placed with the mouse — they were swallowed too.
+
+   Drag tracking runs off document mousemove + elementFromPoint rather than
+   per-cell mouseover, so the selection keeps following the pointer over the row
+   handles and the info column, and past the edge of the grid, which scrolls. */
+let _dragPt=null, _dragRAF=null;
+function dragTarget(x,y){
+  const el=document.elementFromPoint(x,y); const cell=el&&el.closest&&el.closest(".cell");
+  return cell && sheet.container && sheet.container.contains(cell) ? shCoord(cell) : null;
+}
+function dragUpdate(){
+  if(!_dragPt || (!sheet.drag && !sheet.fill)) return;
+  const co=dragTarget(_dragPt.x,_dragPt.y); if(!co) return;
+  if(sheet.fill){ if(!sheet.fillTo || sheet.fillTo.r!==co.r || sheet.fillTo.c!==co.c){ sheet.fillTo=co; paintSelection(); } }
+  else if(!sheet.focus || sheet.focus.r!==co.r || sheet.focus.c!==co.c){ sheet.focus=co; paintSelection(); }
+}
+function dragAutoScroll(){
+  _dragRAF=null;
+  if(!_dragPt || (!sheet.drag && !sheet.fill)) return;
+  const wrap=sheet.container && sheet.container.querySelector(".grid-wrap"); if(!wrap) return;
+  const b=wrap.getBoundingClientRect(), head=62, edge=28;
+  let dy=0, dx=0;
+  if(_dragPt.y>b.bottom-edge) dy=Math.min(40,(_dragPt.y-(b.bottom-edge))/2+4);
+  else if(_dragPt.y<b.top+head) dy=-Math.min(40,((b.top+head)-_dragPt.y)/2+4);
+  if(_dragPt.x>b.right-edge) dx=Math.min(40,(_dragPt.x-(b.right-edge))/2+4);
+  else if(_dragPt.x<b.left+edge) dx=-Math.min(40,((b.left+edge)-_dragPt.x)/2+4);
+  if(dy||dx){
+    const t0=wrap.scrollTop, l0=wrap.scrollLeft;
+    wrap.scrollTop+=dy; wrap.scrollLeft+=dx;
+    if(wrap.scrollTop===t0 && wrap.scrollLeft===l0) return;       // already at the edge
+    const x=Math.max(b.left+4,Math.min(_dragPt.x,b.right-6)), y=Math.max(b.top+head+2,Math.min(_dragPt.y,b.bottom-6));
+    const co=dragTarget(x,y);
+    if(co){ if(sheet.fill) sheet.fillTo=co; else sheet.focus=co; paintSelection(); }
+    _dragRAF=requestAnimationFrame(dragAutoScroll);
+  }
+}
 function attachSheetMouse(c){
   if(c.dataset.sheetWired) return; c.dataset.sheetWired="1";
   const onSheet=()=>state.view==="flow"||state.view==="changes";
   c.addEventListener("mousedown", e=>{
-    if(!onSheet()) return;
-    if(e.target.closest(".fill-handle")){ e.preventDefault(); sheet.fill=true; sheet.fillTo=selRect().r2; return; }
+    if(!onSheet() || e.button!==0) return;
+    if(e.target.closest(".cellinput,.datepick-btn,.datepick-hidden")) return;   // clicks inside the editor
+    const ed=document.querySelector(".cellinput"); if(ed) ed.blur();             // clicking away commits
+    if(e.target.closest(".fill-handle")){ e.preventDefault(); sheet.fill=true; sheet.fillTo=null; _dragPt={x:e.clientX,y:e.clientY}; return; }
     const cell=e.target.closest(".cell"); if(!cell) return; const co=shCoord(cell); if(!co) return;
     e.preventDefault();
     if(e.shiftKey && sheet.anchor){ sheet.focus=co; } else { sheet.anchor=co; sheet.focus=co; sheet.drag=true; }
+    _dragPt={x:e.clientX,y:e.clientY};
     paintSelection();
   });
-  c.addEventListener("mouseover", e=>{
-    if(!onSheet() || (!sheet.drag && !sheet.fill)) return;
-    const cell=e.target.closest(".cell"); if(!cell) return; const co=shCoord(cell); if(!co) return;
-    if(sheet.fill){ sheet.fillTo=co.r; } else { sheet.focus=co; }
-    paintSelection();
-  });
-  c.addEventListener("dblclick", e=>{ if(!onSheet()) return; const cell=e.target.closest(".cell"); if(!cell) return; const co=shCoord(cell); if(co){ sheet.anchor=co; sheet.focus=co; } editActive(); });
+  c.addEventListener("dblclick", e=>{ if(!onSheet()) return; if(e.target.closest(".cellinput")) return;
+    const cell=e.target.closest(".cell"); if(!cell) return; const co=shCoord(cell); if(co){ sheet.anchor=co; sheet.focus=co; } editActive(); });
 }
 function sheetActive(){ return sheet.container && (state.view==="flow"||state.view==="changes") && !isEditingOpen(); }
 function onSheetKey(e){
   if(!sheetActive()) return;
   const ae=document.activeElement; if(ae && (ae.tagName==="INPUT"||ae.tagName==="TEXTAREA"||ae.tagName==="SELECT")) return;
   const k=e.key, ctrl=e.ctrlKey||e.metaKey;
+  if(ctrl && (k==="z"||k==="Z") && !e.shiftKey){ e.preventDefault(); doUndo(); return; }
   if(!sheet.anchor && !k.startsWith("Arrow")) return;
-  if(k==="ArrowUp"){ e.preventDefault(); moveActive("up",e.shiftKey); }
-  else if(k==="ArrowDown"){ e.preventDefault(); moveActive("down",e.shiftKey); }
-  else if(k==="ArrowLeft"){ e.preventDefault(); moveActive("left",e.shiftKey); }
-  else if(k==="ArrowRight"){ e.preventDefault(); moveActive("right",e.shiftKey); }
+  const arrows={ArrowUp:"up",ArrowDown:"down",ArrowLeft:"left",ArrowRight:"right"};
+  if(arrows[k]){ e.preventDefault(); moveActive(arrows[k],e.shiftKey,ctrl); }
+  else if(k==="PageDown"||k==="PageUp"){ e.preventDefault(); moveActive(k==="PageDown"?"pgdn":"pgup",e.shiftKey); }
+  else if(k==="Home"){ e.preventDefault(); if(ctrl) moveActive("up",e.shiftKey,true); moveActive("left",e.shiftKey,true); }
+  else if(k==="End"){ e.preventDefault(); if(ctrl) moveActive("down",e.shiftKey,true); moveActive("right",e.shiftKey,true); }
   else if(k==="Tab"){ e.preventDefault(); moveActive(e.shiftKey?"left":"right",false); }
   else if(k==="Enter"||k==="F2"){ e.preventDefault(); editActive(); }
   else if(k==="Escape"){ sheet.focus={r:sheet.anchor.r,c:sheet.anchor.c}; paintSelection(); }
-  else if(k==="Delete"||k==="Backspace"){ e.preventDefault(); clearSelection(); }
+  else if(k==="Delete"){ e.preventDefault(); clearSelection(); }
+  else if(k==="Backspace"){ e.preventDefault(); const s=selRect(); if(s.r1===s.r2&&s.c1===s.c2) editActive(""); else clearSelection(); }
+  else if(ctrl && (k==="a"||k==="A")){ e.preventDefault(); const {R,C}=shDims(sheet.container); if(R&&C){ sheet.anchor={r:0,c:0}; sheet.focus={r:R-1,c:C-1}; paintSelection(); } }
   else if(ctrl && (k==="d"||k==="D")){ e.preventDefault(); fillDir("down"); }
   else if(ctrl && (k==="r"||k==="R")){ e.preventDefault(); fillDir("right"); }
-  else if(ctrl){ /* let native copy/paste/select-all pass through */ }
+  else if(ctrl){ /* let native copy/paste pass through to the listeners below */ }
   else if(k.length===1 && !e.altKey){ e.preventDefault(); editActive(k); }
 }
 if(!window._sheetDocBound){ window._sheetDocBound=true;
-  document.addEventListener("mouseup", ()=>{ if(sheet.fill){ sheet.fill=false; const to=sheet.fillTo; sheet.fillTo=null; doHandleFill(to); } sheet.drag=false; });
+  document.addEventListener("mousemove", e=>{
+    if(!sheet.drag && !sheet.fill) return;
+    _dragPt={x:e.clientX,y:e.clientY};
+    dragUpdate();
+    if(!_dragRAF) _dragRAF=requestAnimationFrame(dragAutoScroll);
+  });
+  document.addEventListener("mouseup", ()=>{
+    if(sheet.fill){ const fr=fillRect(); sheet.fill=false; sheet.fillTo=null; if(fr) doHandleFill(fr); else paintSelection(); }
+    sheet.drag=false; _dragPt=null;
+  });
   document.addEventListener("keydown", onSheetKey);
   document.addEventListener("copy", e=>{ if(!sheetActive()||!sheet.anchor) return; const ae=document.activeElement; if(ae && (ae.tagName==="INPUT"||ae.tagName==="TEXTAREA")) return;
-    const tsv=selTSV(); if(tsv==null) return; e.preventDefault(); (e.clipboardData||window.clipboardData).setData("text/plain",tsv); });
+    const tsv=selTSV(); if(tsv==null) return; e.preventDefault(); (e.clipboardData||window.clipboardData).setData("text/plain",tsv); flashCopied(); });
   document.addEventListener("paste", e=>{ if(!sheetActive()||!sheet.anchor) return; const ae=document.activeElement; if(ae && (ae.tagName==="INPUT"||ae.tagName==="TEXTAREA")) return;
     const cd=e.clipboardData||window.clipboardData, txt=cd&&cd.getData("text"); if(!txt) return; e.preventDefault(); doPaste(txt); });
 }
