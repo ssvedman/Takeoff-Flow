@@ -521,9 +521,22 @@ table.grid tbody td.handle-td{ overflow:visible!important; position:relative; }
 /* ---------- Flow of Takeoffs: "Added on" info icon at the end of each row ---------- */
 table.grid thead th.rowinfo-h{width:28px;min-width:28px;padding:0}
 table.grid tbody td.rowinfo{width:28px;min-width:28px;text-align:center;padding:0!important;color:var(--muted)}
-.rowinfo-i{display:inline-block;cursor:help;font-size:14px;line-height:22px;opacity:.55;border-radius:50%;padding:0 3px;outline:none}
-.rowinfo-i:hover,.rowinfo-i:focus-visible{opacity:1;color:var(--blue)}
+/* A vector icon (CSS mask on ::before), so it is crisp at any zoom and takes the
+   text colour. It was the Unicode ⓘ glyph, which renders blurry and differently
+   in every font. One element per row, no inline SVG in 1,600 rows. */
+.rowinfo-i{display:inline-flex;align-items:center;justify-content:center;width:19px;height:19px;vertical-align:middle;
+  cursor:help;outline:none;border-radius:50%;color:#8a97a8;transition:color .12s,background-color .12s}
+/* the icon itself: a pseudo-element, so the mask can't clip the focus ring */
+.rowinfo-i::before{content:"";width:15px;height:15px;background-color:currentColor;
+  -webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Ccircle cx='10' cy='10' r='8.1' fill='none' stroke='black' stroke-width='1.85'/%3E%3Ccircle cx='10' cy='6.1' r='1.25' fill='black'/%3E%3Crect x='9.1' y='8.6' width='1.8' height='6' rx='.9' fill='black'/%3E%3C/svg%3E") center/contain no-repeat;
+          mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Ccircle cx='10' cy='10' r='8.1' fill='none' stroke='black' stroke-width='1.85'/%3E%3Ccircle cx='10' cy='6.1' r='1.25' fill='black'/%3E%3Crect x='9.1' y='8.6' width='1.8' height='6' rx='.9' fill='black'/%3E%3C/svg%3E") center/contain no-repeat}
+table.grid tbody tr:hover .rowinfo-i{color:#5b6b7f}
+.rowinfo-i:hover,.rowinfo-i:focus-visible{color:var(--blue)!important;background-color:var(--blue-050)}
 .rowinfo-i:focus-visible{box-shadow:0 0 0 2px var(--blue)}
+[data-theme="dark"] .rowinfo-i{color:#6f7f93}
+[data-theme="dark"] table.grid tbody tr:hover .rowinfo-i{color:#a7b4c4}
+.ri-line{margin-top:6px;padding-top:6px;border-top:1px solid var(--line);font-size:12px}
+.ri-yes{color:var(--good)} .ri-no{color:var(--bad)}
 
 /* ---------- cell editor: text date entry + calendar button ---------- */
 table.grid tbody td .cell.editing{position:relative;padding:0!important}

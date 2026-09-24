@@ -713,7 +713,7 @@ function flowRowCells(r, canEd){
         h+=cellHTML(r.id,c,disp,raw,canEd);
       }
     });
-    h+=`<td class="rowinfo"><span class="rowinfo-i" data-info="${r.id}" tabindex="0" role="button" aria-label="When this row was added">&#9432;</span></td>`;
+    h+=`<td class="rowinfo"><span class="rowinfo-i" data-info="${r.id}" tabindex="0" role="button" aria-label="Row details: when it was added and whether it has active starts"></span></td>`;
     return h;
 }
 /* Repaint rows in place after an edit. Like Excel, an edited row stays where it
@@ -1195,12 +1195,31 @@ function fmtStamp(ts){
   return d.toLocaleDateString(undefined,{month:"short",day:"numeric",year:"numeric"})
        + " at " + d.toLocaleTimeString(undefined,{hour:"numeric",minute:"2-digit"});
 }
+/* "Active starts": is this row on the Starts Log from today forward? The same
+   rule the Plans tab uses for red, applied to the row, so the two never disagree:
+   · yes     — its latest start in the most recent import (last_trench_date), or
+               its first trench date, is today or later;
+   · no      — the latest import has it, but only with starts before today;
+   · unknown — no import has stamped it yet, and its first trench is past.
+               Absence of data isn't evidence it dropped off (see planStatusIndex). */
+function rowActiveStarts(r){
+  const today=todayIso(), last=r.last_trench_date||null, first=r.first_trench_date||null;
+  if(last && last>=today) return { st:"yes", date:last, what:"latest start" };
+  if(first && first>=today) return { st:"yes", date:first, what:"first trench" };
+  if(last) return { st:"no", date:last };
+  return { st:"unknown", date:first };
+}
 function rowInfoHTML(r){
   const ts=r.created_at || justAdded.get(r.id) || null;
   const by=r.created_by || (justAdded.has(r.id) ? state.email : "");
   const when = ts ? esc(fmtStamp(ts)) : `<span class="muted">not recorded</span>`;
+  const a=rowActiveStarts(r);
+  const act = a.st==="yes" ? `<b class="ri-yes">Yes</b>${a.date?` <span class="chip-tip-c">· ${a.what} ${esc(fmtDate(a.date))}</span>`:""}`
+            : a.st==="no"  ? `<b class="ri-no">No</b>${a.date?` <span class="chip-tip-c">· last start ${esc(fmtDate(a.date))}</span>`:""}`
+            :                `<b class="muted">Unknown</b> <span class="chip-tip-c">· not in a Starts Log import yet</span>`;
   return `<div class="chip-tip-h">Added on: ${when}</div>`
     + (by?`<div class="chip-tip-c">by ${esc(by)}</div>`:"")
+    + `<div class="ri-line">Active starts: ${act}</div>`
     + (r.updated_at && ts && Math.abs(new Date(r.updated_at)-new Date(ts))>60000
         ? `<div class="chip-tip-c">Last changed ${esc(fmtStamp(r.updated_at))}${r.updated_by?` by ${esc(r.updated_by)}`:""}</div>` : "");
 }
