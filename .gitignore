@@ -21,3 +21,4 @@ verify_flow_rows.sql
 add_created_at.sql
 harden_reset_tokens_poolA.sql
 harden_reset_tokens_poolA.sql
+harden_reset_tokens_poolA.sql
