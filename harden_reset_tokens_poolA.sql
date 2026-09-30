@@ -57,10 +57,17 @@ $$;
 revoke all on function public.is_allowed_signup_domain(text) from public, anon, authenticated;
 
 create or replace function public.is_admin_email(p_email text) returns boolean
- language sql stable security definer set search_path to '' as $$
- select exists(select 1 from public.app_roles     where lower(email)=lower(p_email) and role='admin')
-     or exists(select 1 from public.tf_app_roles  where lower(email)=lower(p_email) and role='admin')
-     or exists(select 1 from public.cdb_app_roles where lower(email)=lower(p_email) and role='admin') $$;
+ language plpgsql stable security definer set search_path to '' as $$
+declare t text; v boolean; begin
+  foreach t in array array['app_roles','tf_app_roles','cdb_app_roles','pdb_app_roles'] loop
+    if to_regclass('public.'||t) is not null then
+      execute format('select exists(select 1 from public.%I where lower(email)=lower($1) and role=''admin'')', t)
+        into v using p_email;
+      if v then return true; end if;
+    end if;
+  end loop;
+  return false;
+end $$;
 revoke all on function public.is_admin_email(text) from public, anon, authenticated;
 
 
