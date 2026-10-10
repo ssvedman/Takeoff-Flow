@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Moved to bluprnt.dev</title>
+<script>
+/* This site moved to bluprnt.dev. Record that this old address is still in
+   use, then send the visitor to the same page there, keeping everything after
+   the app name, including the part after "#". */
+(function () {
+  var parts = location.pathname.replace(/^\/+/, "").split("/");
+  var app = (parts.shift() || "").toLowerCase();
+  var rest = parts.join("/").replace(/^index\.html$/, "");
+  var base = app === "blueprint" || app === "" ? "/" : "/" + app + "/";
+  var to = "https://bluprnt.dev" + base + rest + location.search + location.hash;
+  var gone = false;
+  function go() { if (!gone) { gone = true; location.replace(to); } }
+  try {
+    /* Who: the address this browser last signed in with on the old site, if
+       any. Only the address is read; no sign-in token leaves the browser. The
+       part after "#" is not sent: it can hold private links. */
+    var email = null;
+    try { email = (JSON.parse(localStorage.getItem("lennar-vendor-portal-auth") || "{}").user || {}).email || null; } catch (e) {}
+    var key = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1lbWh6cXBobHVkaXJ1b3Z1end0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQyMTI3MjUsImV4cCI6MjA5OTc4ODcyNX0.hTJBtb3WtkgY66xqzZ22GT7V4VNllxPyb4C7qXRFFVI";
+    fetch("https://memhzqphludiruovuzwt.supabase.co/rest/v1/rpc/redirect_log_add", {
+      method: "POST", keepalive: true,
+      headers: { apikey: key, Authorization: "Bearer " + key, "Content-Type": "application/json" },
+      body: JSON.stringify({ p_url: location.origin + location.pathname + location.search, p_email: email })
+    }).then(go, go);
+  } catch (e) {}
+  /* Never keep the visitor waiting on the record. */
+  setTimeout(go, 700);
+})();
+</script>
+</head>
+<body style="font:16px system-ui,sans-serif;margin:15vh auto;max-width:28em;padding:0 1em;text-align:center">
+<h1 style="font-size:1.4em">This site has moved</h1>
+<p><a href="https://bluprnt.dev/">Continue to bluprnt.dev</a></p>
+</body>
+</html>
